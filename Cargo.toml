@@ -1,0 +1,7 @@
+[package]
+name = "hevcpress"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+xz2 = "0.1.7"
