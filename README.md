@@ -13,12 +13,17 @@ context-mixing model, and can rebuild the original file **bit for bit**.
 cargo build --release
 hevcpress pack   [-j N] files...           # writes <file>.hvp for each, N files in parallel
 hevcpress unpack [-j N] files.hvp...       # restores <file>, byte-identical
+hevcpress view   files.hvp...              # decompress to a temporary copy and open it
 hevcpress compress   in.mov  in.mov.hvp     # single file
 hevcpress decompress in.mov.hvp  out.mov
 hevcpress verify     file...                # compress + check, print sizes
 hevcpress inspect    file...                # NAL / slice-type byte breakdown
 hevcpress syntax [-v] [--cold] file...      # bits per syntax element, CABAC vs model
 ```
+
+`.hvp` files are an archive format: no viewer can open them directly, since the
+bytes are no longer valid HEVC. `view` restores a temporary copy and opens it in
+the default app (Photos/Preview/QuickTime on macOS).
 
 `pack` and `unpack` never overwrite an existing file. Every compression checks
 its own round trip before anything is written.

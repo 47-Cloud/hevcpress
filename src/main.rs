@@ -116,6 +116,42 @@ fn jobs_and_files(args: &[String]) -> (usize, Vec<String>) {
     (jobs, files)
 }
 
+/// Name for a restored file: `photo.HEIC.hvp` -> `photo.HEIC`; otherwise
+/// guess the extension from the content so the viewer recognises it.
+fn restored_name(path: &str, data: &[u8]) -> String {
+    let base = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
+    if let Some(stem) = base.strip_suffix(".hvp") {
+        return stem.to_string();
+    }
+    let ext = match data.get(4..12) {
+        Some(b) if &b[..4] == b"ftyp" && (&b[4..] == b"qt  ") => "mov",
+        Some(b) if &b[..4] == b"ftyp" && matches!(&b[4..], b"heic" | b"heix" | b"mif1" | b"msf1") => "heic",
+        Some(b) if &b[..4] == b"ftyp" => "mp4",
+        _ => "bin",
+    };
+    format!("{base}.{ext}")
+}
+
+/// Decompress `path` into a fresh temporary folder and open it with the default app.
+fn view(path: &str) -> Result<(), String> {
+    let data = codec::decompress(&read_file(path)?)?;
+    let dir = std::env::temp_dir().join(format!(
+        "hevcpress-view-{}-{}",
+        process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(restored_name(path, &data));
+    fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+    let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let status = process::Command::new(opener).arg(&out).status().map_err(|e| format!("{opener}: {e}"))?;
+    if !status.success() && !cfg!(windows) {
+        return Err(format!("{opener} could not open {}", out.display()));
+    }
+    println!("{path} -> {} (temporary copy, opened)", out.display());
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -220,6 +256,19 @@ fn main() {
                 process::exit(1);
             }
         }
+        Some("view") if args.len() > 2 => {
+            // Decompress to a temporary copy and open it in the default viewer.
+            let mut failed = false;
+            for f in &args[2..] {
+                if let Err(e) = view(f) {
+                    eprintln!("{f}: {e}");
+                    failed = true;
+                }
+            }
+            if failed {
+                process::exit(1);
+            }
+        }
         Some("verify") if args.len() > 2 => {
             for f in &args[2..] {
                 if let Err(e) = verify(f) {
@@ -229,8 +278,23 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: hevcpress pack|unpack [-j N] files... | compress|decompress in out | verify|inspect|syntax files...");
+            eprintln!("usage: hevcpress pack|unpack [-j N] files... | view files.hvp... | compress|decompress in out | verify|inspect|syntax files...");
             process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_name;
+
+    #[test]
+    fn names_for_viewing() {
+        let heic = b"\0\0\0\x18ftypheic\0\0\0\0";
+        let mov = b"\0\0\0\x14ftypqt  \0\0\0\0";
+        assert_eq!(restored_name("/a/IMG_1.HEIC.hvp", heic), "IMG_1.HEIC");
+        assert_eq!(restored_name("/a/renamed", heic), "renamed.heic");
+        assert_eq!(restored_name("/a/clip", mov), "clip.mov");
+        assert_eq!(restored_name("x", b"random"), "x.bin");
     }
 }
