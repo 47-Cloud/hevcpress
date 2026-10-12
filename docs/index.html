@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Squeezing another 10% out of iPhone photos, losslessly</title>
+<meta name="description" content="A tool that makes iPhone photos and Live Photo videos about 10% smaller and gives back the exact original file. How it works, and what didn't.">
+<link rel="canonical" href="https://47-cloud.github.io/hevcpress/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Squeezing another 10% out of iPhone photos, losslessly">
+<meta property="og:description" content="iPhone photos and Live Photo videos about 10% smaller, restored bit for bit. General-purpose compressors manage about 3%.">
+<meta property="og:url" content="https://47-cloud.github.io/hevcpress/">
+<meta name="twitter:card" content="summary">
+<style>
+  :root {
+    --bg: #fcfcfa; --fg: #1f2328; --muted: #59636e; --line: #d8dee4; --code-bg: #eff2f5;
+    --link: #0b5cc4; --accent: #2d6fd2; --bar: #b9b9ae;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171a; --fg: #e6e8eb; --muted: #9aa3ad; --line: #30363d; --code-bg: #22272e;
+      --link: #79b0ff; --accent: #5b9bf0; --bar: #5c5f5a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171a; --fg: #e6e8eb; --muted: #9aa3ad; --line: #30363d; --code-bg: #22272e;
+    --link: #79b0ff; --accent: #5b9bf0; --bar: #5c5f5a;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 18px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  article { max-width: 700px; margin: 0 auto; padding: 56px 16px 80px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.35rem; margin: 2.4em 0 0.5em; }
+  p, ol, ul { margin: 0 0 1em; }
+  li { margin-bottom: 0.4em; }
+  a { color: var(--link); }
+  .meta { color: var(--muted); font-size: 0.95rem; margin-bottom: 2em; }
+  .lead { font-size: 1.15rem; }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+  .table-wrap { overflow-x: auto; margin: 0 0 1.2em; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { font-weight: 600; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  figure { margin: 1.5em 0 1.6em; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 6px; }
+  .chart-title { font-weight: 600; font-size: 17px; fill: var(--fg); }
+  .chart-sub, .chart-label { font-size: 13px; fill: var(--muted); }
+  .chart-label.hi, .chart-value.hi { fill: var(--fg); font-weight: 600; }
+  .chart-value { font-size: 13px; fill: var(--fg); font-variant-numeric: tabular-nums; }
+  .bar { fill: var(--bar); }
+  .bar.hi { fill: var(--accent); }
+  footer { margin-top: 3em; padding-top: 1.2em; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.95rem; }
+  @media (max-width: 520px) {
+    body { font-size: 17px; }
+    h1 { font-size: 1.7rem; }
+    article { padding-top: 32px; }
+  }
+</style>
+</head>
+<body>
+<article>
+  <h1>Squeezing another 10% out of iPhone photos, losslessly</h1>
+  <div class="meta">12 October 2026 · <a href="https://github.com/47-Cloud/hevcpress">github.com/47-Cloud/hevcpress</a></div>
+
+  <p class="lead">I wrote a tool that makes iPhone photos and Live Photo videos about 10% smaller and gives back the exact original file on the way out. General-purpose compressors manage about 3% on the same files. This is how it works, and what I tried that didn't.</p>
+
+  <h2>Why these files don't compress</h2>
+  <p>A HEIC photo is about 93% HEVC video data, and a Live Photo video is about 91%. The rest is container boxes, metadata and, in the video, a short uncompressed audio track.</p>
+  <p>That HEVC data has already been through CABAC, the arithmetic coder at the end of every HEVC encoder. CABAC is adaptive and close to the entropy of what it codes, so to xz or zstd its output looks like random bytes. On my test files, xz -9e saved 2.95% and zstd at its maximum saved 2.43%. Part of even that came from the audio and metadata rather than the video.</p>
+  <p>So the only way to do much better is to stop treating the file as bytes and start treating it as HEVC.</p>
+
+  <h2>The idea</h2>
+  <p>CABAC codes a long run of binary decisions, or bins: is this coefficient non-zero, is this block split, which intra mode was chosen. Each bin is coded with a probability from a small adaptive state, picked by a fixed rule in the standard. Those rules are deliberately simple, because a hardware decoder has to run them in real time. A model that can afford to look at more context should predict the same bins better.</p>
+  <p>So hevcpress does this:</p>
+  <ol>
+    <li>Parse the HEVC bitstream and decode every CABAC bin, without reconstructing any pixels.</li>
+    <li>Code each bin again with a stronger model and a plain binary arithmetic coder.</li>
+    <li>To decompress, decode the bins from that stream and feed them to a CABAC encoder, which rebuilds the original slice data bit for bit.</li>
+  </ol>
+  <p>None of this is new in principle. Dropbox did the same for JPEG with Lepton, which saves about 22% because JPEG's Huffman coding leaves a lot of slack. They also tried it for H.264 with avrecode, now abandoned. I couldn't find anything public that does it for HEVC.</p>
+
+  <h2>A parser that has to be exactly right</h2>
+  <p>The hard part is that nothing can be approximate. If the parser picks the wrong context for a single bin, every bin after it decodes as garbage. So I wrote a full HEVC slice-data parser in Rust: parameter sets, slice headers, the coding tree, prediction units, transform trees and residual coding, for I, P and B slices. It reads bins and stops there. There is no intra prediction, motion compensation, transform or loop filter.</p>
+  <p>The nice thing about CABAC is that it tells you when you've got it wrong. A slice is only parsed correctly if the decoder reaches the end-of-slice flag exactly at the last coded block, within the last byte of the data. A bug almost never survives that. A second check: adding up the cost of every bin under CABAC's own probabilities should give the slice's actual size. On my files it came within 0.05%.</p>
+  <p>Apple's encoder threw one curve ball. It uses wavefront parallel processing, where each row of 32x32 blocks is a separate arithmetic-coded substream whose state is inherited from the row above. Once that was handled, all 799 slices in the first six files parsed to the exact byte.</p>
+  <p>Decompression needs the reverse: a CABAC encoder that, given the same bins, writes the same bytes the iPhone wrote. That isn't guaranteed, since an encoder has some freedom in how it ends each substream. So before compressing a slice, hevcpress replays its bins through that encoder and compares. Every slice from Apple's encoder has reproduced exactly so far. One that didn't would simply stay as it is.</p>
+
+  <h2>The model</h2>
+  <p>Each bin is predicted by mixing up to fourteen hashed contexts with a small logistic mixer, in the style of the PAQ compressors. The contexts are things CABAC's fixed rules don't look at: coefficient levels already decoded in this block and in the blocks to the left and above, the matching chroma or luma block, the current QP, the intra mode, the neighbouring blocks' sizes, SAO settings and so on. Each context keeps a fast and a slow probability, and the mixer learns which ones to trust.</p>
+  <p>One rule matters more than any context: the model is integer-only. The decompressor has to compute every probability exactly as the compressor did, on any machine and any compiler. Floating point, or a <code>log()</code> from the system maths library, can differ in the last bit, and then the stream silently decodes to garbage. So the squash and stretch functions are fixed lookup tables in the source, and all the arithmetic is integer.</p>
+  <p>Here is where the bits go in one of the Live Photo videos, and how much the model saves on each kind of bin:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>syntax element</th><th class="n">share of the bits</th><th class="n">model saving</th></tr></thead>
+    <tbody>
+      <tr><td>significant-coefficient flags</td><td class="n">25.8%</td><td class="n">8.2%</td></tr>
+      <tr><td>coefficient signs</td><td class="n">13.8%</td><td class="n">2.2%</td></tr>
+      <tr><td>coefficient levels (remainder)</td><td class="n">11.3%</td><td class="n">5.8%</td></tr>
+      <tr><td>last-coefficient position</td><td class="n">10.0%</td><td class="n">9.8%</td></tr>
+      <tr><td>greater-than-one flags</td><td class="n">8.8%</td><td class="n">9.5%</td></tr>
+      <tr><td>QP deltas</td><td class="n">3.8%</td><td class="n">14.9%</td></tr>
+      <tr><td>coded-block flags</td><td class="n">4.8%</td><td class="n">18-19%</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Coefficient data is about 70% of everything, and that is where savings are hardest. Signs are close to coin flips. The small syntax elements save more in percentage terms but don't add up to much. Across the whole video, slice data shrinks by about 8.5%, and photos, which are all intra-coded, by about 6%.</p>
+  <p>The audio in Live Photos is uncompressed 16-bit PCM, so it gets its own path: a two-stage NLMS predictor whose residual goes through the same model. It comes out 15-27% smaller than FLAC at its highest setting.</p>
+
+  <h2>Results</h2>
+  <figure>
+    <svg viewBox="0 0 760 352" role="img" aria-label="hevcpress saves about three times as much as the best general-purpose compressor">
+      <text class="chart-title" x="0" y="26">hevcpress saves about three times as much as the best general-purpose compressor</text>
+      <text class="chart-sub" x="0" y="50">Space saved on eight iPhone photos and Live Photo videos (19.3 MB), each tool at its strongest setting</text>
+      <g>
+        <text class="chart-label hi" x="158" y="104" text-anchor="end">hevcpress</text>
+        <rect class="bar hi" x="170" y="88" width="480" height="22" rx="2"><title>hevcpress: 10.62% smaller</title></rect>
+        <text class="chart-value hi" x="658" y="104">10.62%</text>
+
+        <text class="chart-label" x="158" y="140" text-anchor="end">zpaq -m5</text>
+        <rect class="bar" x="170" y="124" width="152.8" height="22" rx="2"><title>zpaq -m5: 3.38% smaller</title></rect>
+        <text class="chart-value" x="330.8" y="140">3.38%</text>
+
+        <text class="chart-label" x="158" y="176" text-anchor="end">7-Zip LZMA2 -mx9</text>
+        <rect class="bar" x="170" y="160" width="133.8" height="22" rx="2"><title>7-Zip LZMA2 -mx9: 2.96% smaller</title></rect>
+        <text class="chart-value" x="311.8" y="176">2.96%</text>
+
+        <text class="chart-label" x="158" y="212" text-anchor="end">xz -9e</text>
+        <rect class="bar" x="170" y="196" width="133.3" height="22" rx="2"><title>xz -9e: 2.95% smaller</title></rect>
+        <text class="chart-value" x="311.3" y="212">2.95%</text>
+
+        <text class="chart-label" x="158" y="248" text-anchor="end">brotli -q 11</text>
+        <rect class="bar" x="170" y="232" width="118.4" height="22" rx="2"><title>brotli -q 11: 2.62% smaller</title></rect>
+        <text class="chart-value" x="296.4" y="248">2.62%</text>
+
+        <text class="chart-label" x="158" y="284" text-anchor="end">zstd -22 --long</text>
+        <rect class="bar" x="170" y="268" width="109.8" height="22" rx="2"><title>zstd -22 --long: 2.43% smaller</title></rect>
+        <text class="chart-value" x="287.8" y="284">2.43%</text>
+
+        <text class="chart-label" x="158" y="320" text-anchor="end">7-Zip PPMd -mx9</text>
+        <rect class="bar" x="170" y="304" width="19.0" height="22" rx="2"><title>7-Zip PPMd -mx9: 0.42% smaller</title></rect>
+        <text class="chart-value" x="197.0" y="320">0.42%</text>
+      </g>
+    </svg>
+    <figcaption>My measurements, October 2026: eight files from an iPhone, four photos and their Live Photo videos.</figcaption>
+  </figure>
+  <p>Photos come out 8.1-8.9% smaller and videos 10.0-13.5%. Videos do better because P and B frames carry more syntax for the model to work on, and because of the audio. Every file comes back byte-identical. One photo and video pair was added after I'd finished tuning, as a check that the model wasn't fitted to the others; it landed in the same range.</p>
+  <p>paq8px, one of the strongest general-purpose compressors there is, was too slow to run on everything at about 2 KB/s. On one photo it saved 3.97% in 590 seconds. hevcpress saved 8.91% on the same file in about 6.5 seconds. Since paq8px is close to the best generic modelling can do, the difference comes from understanding the format.</p>
+  <p>On a 2019 MacBook Pro, a 1.5 MB photo compresses in about 6.5 seconds and restores in 2.5. That includes a full decompression to check the result before anything is written.</p>
+
+  <h2>What didn't work</h2>
+  <p>Some of the ideas I was most confident about made no difference at all.</p>
+  <ul>
+    <li><strong>A bigger or smarter mixer.</strong> Dual-rate probabilities, a second weight set selected by the bin's own context, learning-rate tuning: a few tenths of a percent between them. The engine wasn't the limit.</li>
+    <li><strong>Warm-starting from other files.</strong> I expected a prior trained on earlier photos to help small files. It saved about 0.1%, because the model learns the statistics within the first few tiles of a photo anyway.</li>
+    <li><strong>Context from the previous frame.</strong> Where the previous picture had busy coefficients, the next one probably will too. It did nothing measurable; the neighbouring blocks in the same picture already say the same thing.</li>
+    <li><strong>Decoding the pixels.</strong> This was the big one. The obvious next step was a full HEVC decoder, so the model could look at the actual image around each block. Before writing thousands of lines for it, I faked it: ffmpeg decoded the pictures, and I fed the model the texture and edge direction of the already-decoded neighbourhood. The features were genuinely informative, correlating at 0.48 with coefficient size. They saved 0.05-0.12%. The coefficients of the neighbouring blocks were already telling the model the same thing.</li>
+  </ul>
+  <p>That last experiment took an afternoon and saved weeks. A full decoder might still add a point or two through sign prediction and template-matched intra modes, but not enough to be worth it.</p>
+
+  <h2>Where it ends up</h2>
+  <p>About 10% looks like roughly what these files have to give. Apple's encoder is good, and CABAC is close to the limit of what you can do with the information inside the bitstream.</p>
+  <p>Whether that's worth having depends on scale. For one person's photo library it mostly isn't: 10% of 500 GB is a few dollars of storage a month, and a <code>.hvp</code> file has to be unpacked before you can look at it. For something storing photos by the petabyte, the sums look different, which is exactly why Lepton exists.</p>
+  <p>If you want to make photos smaller and still be able to open them, the answer is a lossy format, and it costs something real. I measured that too. At 30% smaller, JPEG XL scores about 82 on SSIMULACRA2 (around 90 is visually lossless). It drops the HDR gain map and depth data unless you go out of your way to keep them, and the loss is permanent.</p>
+  <p>The code is on GitHub at <a href="https://github.com/47-Cloud/hevcpress">47-Cloud/hevcpress</a>, under MIT or Apache-2.0, with a macOS binary in the <a href="https://github.com/47-Cloud/hevcpress/releases/tag/v0.1.0">first release</a>. It verifies every file before writing it and carries a checksum, but it's young: keep your originals.</p>
+
+  <footer>hevcpress · <a href="https://github.com/47-Cloud/hevcpress">source on GitHub</a> · <a href="https://github.com/47-Cloud/hevcpress/releases">releases</a></footer>
+</article>
+</body>
+</html>

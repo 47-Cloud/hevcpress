@@ -11,6 +11,9 @@ CABAC decisions, codes those with a stronger context-mixing model, and on the
 way back runs a CABAC encoder to regenerate the original bitstream exactly.
 It never decodes the image itself.
 
+There's a longer write-up of how it works, and what didn't, at
+<https://47-cloud.github.io/hevcpress/>.
+
 ## Install
 
 Needs a recent Rust toolchain (1.85 or newer).
