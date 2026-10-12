@@ -21,7 +21,42 @@ use crate::model::Model;
 use crate::ps::{parse_slice_header, ParamSets, SliceHeader};
 use std::io::{Read, Write};
 
-const MAGIC: &[u8; 4] = b"HVP1";
+/// File header: "HVP" + format version (an ASCII digit), then the mode byte.
+///
+/// Bump `FORMAT` whenever the model, its contexts or the layout change: the bin
+/// stream can only be decoded by exactly the model that wrote it.
+///   format 1: mode, payload (no checksum)
+///   format 2: mode, CRC-32 of the original file (LE), payload
+/// Formats 1 and 2 use the same model, so this build reads both.
+const MAGIC: &[u8; 3] = b"HVP";
+const FORMAT: u8 = b'2';
+
+/// CRC-32 (IEEE 802.3), used to check every decompressed file.
+pub fn crc32(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+            *v = c;
+        }
+        t
+    });
+    !data.iter().fold(!0u32, |c, &b| t[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8))
+}
+
+/// Wrap a body (mode byte + payload) in the current header.
+fn wrap(original: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut out = MAGIC.to_vec();
+    out.push(FORMAT);
+    out.push(body[0]);
+    out.extend_from_slice(&crc32(original).to_le_bytes());
+    out.extend_from_slice(&body[1..]);
+    out
+}
 
 pub fn escape(rbsp: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rbsp.len() + rbsp.len() / 64 + 2);
@@ -233,16 +268,13 @@ fn new_states(configs: &[Config]) -> Vec<ConfigState> {
 
 /// Plain xz, or the bytes as they are if xz does not help.
 fn fallback(data: &[u8]) -> Vec<u8> {
-    let mut out = MAGIC.to_vec();
     let xz = xz_compress(data);
-    if xz.len() < data.len() {
-        out.push(0);
-        out.extend(xz);
+    let body = if xz.len() < data.len() {
+        [&[0u8][..], &xz].concat()
     } else {
-        out.push(2);
-        out.extend_from_slice(data);
-    }
-    out
+        [&[2u8][..], data].concat()
+    };
+    wrap(data, &body)
 }
 
 pub struct Report {
@@ -261,7 +293,8 @@ pub fn compress(data: &[u8], verify: bool) -> (Vec<u8>, Report) {
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_compress(data, &mut report)))
         .unwrap_or_else(|_| Err("malformed container".into()));
     let out = match attempt {
-        Ok(out) => {
+        Ok(body) => {
+            let out = wrap(data, &body);
             if verify {
                 match decompress(&out) {
                     Ok(back) if back == data => out,
@@ -366,8 +399,7 @@ fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
     report.meta_bytes = meta_xz.len();
     report.stream_bytes = stream.len();
 
-    let mut out = MAGIC.to_vec();
-    out.push(1);
+    let mut out = vec![1u8];
     let mut w = W::default();
     w.v(data.len() as u64);
     w.v(meta_xz.len() as u64);
@@ -455,15 +487,61 @@ fn code_slice(
 }
 
 pub fn decompress(comp: &[u8]) -> Result<Vec<u8>, String> {
-    if comp.len() < 5 || &comp[..4] != MAGIC {
-        return Err("not a compressed file".into());
+    if comp.len() < 5 || &comp[..3] != MAGIC {
+        return Err("not a hevcpress file".into());
     }
-    match comp[4] {
-        0 => xz_decompress(&comp[5..]),
-        1 => std::panic::catch_unwind(|| decompress_hevc(&comp[5..]))
-            .unwrap_or_else(|_| Err("corrupt compressed data".into())),
-        2 => Ok(comp[5..].to_vec()),
+    match comp[3] {
+        b'1' => decode_body(comp[4], &comp[5..]),
+        b'2' => {
+            let crc = comp.get(5..9).ok_or("truncated file")?;
+            let out = decode_body(comp[4], &comp[9..])?;
+            if crc32(&out).to_le_bytes() != crc {
+                return Err("checksum mismatch: the file is corrupt or was written by an incompatible build".into());
+            }
+            Ok(out)
+        }
+        v => Err(format!(
+            "file is format {}, this build reads formats 1-{}; use the hevcpress version that wrote it",
+            v as char, FORMAT as char
+        )),
+    }
+}
+
+fn decode_body(mode: u8, payload: &[u8]) -> Result<Vec<u8>, String> {
+    match mode {
+        0 => xz_decompress(payload),
+        1 => std::panic::catch_unwind(|| decompress_hevc(payload))
+            .unwrap_or_else(|_| Err("internal error".into()))
+            .map_err(|e| format!("corrupt or incompatible file ({e})")),
+        2 => Ok(payload.to_vec()),
         m => Err(format!("unknown mode {m}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_check_value() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn header_roundtrip_and_errors() {
+        let data = b"not a video, just some bytes to store".repeat(20);
+        let (comp, _) = compress(&data, true);
+        assert_eq!(&comp[..4], b"HVP2");
+        assert_eq!(decompress(&comp).unwrap(), data);
+
+        let mut bad = comp.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(decompress(&bad).is_err());
+
+        let mut future = comp.clone();
+        future[3] = b'9';
+        assert!(decompress(&future).unwrap_err().contains("format 9"));
     }
 }
 

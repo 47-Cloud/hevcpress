@@ -104,6 +104,13 @@ more slack than HEVC's CABAC.
 
 ## Safety
 
+- Every file stores a CRC-32 of the original, checked after decompression:
+  corruption or a bug gives an error, never wrong output.
+- The header carries a format version (`HVP2`). The compressed stream can only
+  be decoded by the exact model that wrote it, so the version must be bumped
+  whenever the model or its contexts change; a build refuses formats it does not
+  know instead of producing garbage. Format 1 files (no checksum, same model)
+  are still read.
 - The model must never use floating point or anything platform dependent:
   a different probability in the decompressor corrupts the file silently.
 - `compress` decompresses its own output and compares it with the input.
