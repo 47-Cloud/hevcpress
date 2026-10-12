@@ -60,6 +60,62 @@ fn verify(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write `bytes` to `path` via a temporary file, never replacing an existing file.
+fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
+    if std::path::Path::new(path).exists() {
+        return Err(format!("{path} already exists, not overwriting"));
+    }
+    let tmp = format!("{path}.partial");
+    fs::write(&tmp, bytes).map_err(|e| format!("{tmp}: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Run `job` over `files` on `jobs` threads; returns (input bytes, output bytes, failures).
+fn run_parallel(files: &[String], jobs: usize, job: impl Fn(&str) -> Result<(usize, usize), String> + Sync) -> (u64, u64, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let totals = Mutex::new((0u64, 0u64, 0usize));
+    std::thread::scope(|sc| {
+        for _ in 0..jobs.max(1).min(files.len().max(1)) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(f) = files.get(i) else { break };
+                let r = job(f);
+                let mut t = totals.lock().unwrap();
+                match r {
+                    Ok((a, b)) => {
+                        t.0 += a as u64;
+                        t.1 += b as u64;
+                    }
+                    Err(e) => {
+                        eprintln!("{f}: {e}");
+                        t.2 += 1;
+                    }
+                }
+            });
+        }
+    });
+    totals.into_inner().unwrap()
+}
+
+/// Parse `[-j N] files...`.
+fn jobs_and_files(args: &[String]) -> (usize, Vec<String>) {
+    let mut jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-j" && i + 1 < args.len() {
+            jobs = args[i + 1].parse().unwrap_or(jobs);
+            i += 2;
+        } else {
+            files.push(args[i].clone());
+            i += 1;
+        }
+    }
+    (jobs, files)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -111,6 +167,59 @@ fn main() {
             let out = enc.finish();
             println!("{}: {} -> {} bytes ({:.1}%)", args[2], raw.len(), out.len(), 100.0 * out.len() as f64 / raw.len() as f64);
         }
+        Some("pack") if args.len() > 2 => {
+            // Compress each file to <file>.hvp, several files at a time.
+            let (jobs, files) = jobs_and_files(&args[2..]);
+            let t0 = std::time::Instant::now();
+            let (a, b, failed) = run_parallel(&files, jobs, |f| {
+                let out = format!("{f}.hvp");
+                if std::path::Path::new(&out).exists() {
+                    return Err(format!("{out} already exists, not overwriting"));
+                }
+                let data = read_file(f)?;
+                let (comp, rep) = codec::compress(&data, true);
+                write_new(&out, &comp)?;
+                println!(
+                    "{f}: {} -> {} bytes ({:.2}% smaller, {}/{} slices)",
+                    data.len(),
+                    comp.len(),
+                    100.0 * (1.0 - comp.len() as f64 / data.len().max(1) as f64),
+                    rep.slices_coded,
+                    rep.slices_total
+                );
+                Ok((data.len(), comp.len()))
+            });
+            if a > 0 {
+                println!(
+                    "total: {a} -> {b} bytes ({:.2}% smaller), {} files, {failed} failed, {:.1}s",
+                    100.0 * (1.0 - b as f64 / a as f64),
+                    files.len(),
+                    t0.elapsed().as_secs_f64()
+                );
+            } else {
+                println!("total: nothing packed, {failed} failed");
+            }
+            if failed > 0 {
+                process::exit(1);
+            }
+        }
+        Some("unpack") if args.len() > 2 => {
+            // Restore each <file>.hvp to <file>.
+            let (jobs, files) = jobs_and_files(&args[2..]);
+            let (_, _, failed) = run_parallel(&files, jobs, |f| {
+                let out = f.strip_suffix(".hvp").ok_or("expected a .hvp file")?;
+                if std::path::Path::new(out).exists() {
+                    return Err(format!("{out} already exists, not overwriting"));
+                }
+                let data = codec::decompress(&read_file(f)?)?;
+                write_new(out, &data)?;
+                println!("{f} -> {out} ({} bytes)", data.len());
+                Ok((0, 0))
+            });
+            if failed > 0 {
+                process::exit(1);
+            }
+        }
         Some("verify") if args.len() > 2 => {
             for f in &args[2..] {
                 if let Err(e) = verify(f) {
@@ -120,7 +229,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: hevcpress inspect|syntax|compress|decompress|verify ...");
+            eprintln!("usage: hevcpress pack|unpack [-j N] files... | compress|decompress in out | verify|inspect|syntax files...");
             process::exit(2);
         }
     }

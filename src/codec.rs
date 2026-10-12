@@ -283,8 +283,9 @@ pub fn compress(data: &[u8], verify: bool) -> (Vec<u8>, Report) {
             return (fallback(data), report);
         }
     };
-    let plain = fallback(data);
-    if plain.len() <= out.len() { (plain, report) } else { (out, report) }
+    // Compressing the whole file with xz just to compare is slow; the model
+    // output only loses when the file was not really HEVC, so check against size.
+    if out.len() >= data.len() { (fallback(data), report) } else { (out, report) }
 }
 
 fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
