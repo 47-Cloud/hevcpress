@@ -1,64 +1,75 @@
 # hevcpress
 
-Lossless recompression of iPhone HEIC photos and Live Photo `.mov` files.
+Lossless recompression for iPhone photos (HEIC) and Live Photo videos (MOV).
+Files come out about 10% smaller, and decompressing gives back the original
+file bit for bit.
 
-These files are mostly HEVC video data, which generic compressors (xz, zstd,
-brotli) barely shrink (about 3.6% on the sample files). `hevcpress` parses the
-HEVC bitstream down to its syntax elements, re-codes them with a much stronger
-context-mixing model, and can rebuild the original file **bit for bit**.
+General-purpose compressors get very little out of these files (xz manages
+around 3%) because almost everything in them is HEVC data that is already
+entropy coded. hevcpress parses the HEVC bitstream down to the individual
+CABAC decisions, codes those with a stronger context-mixing model, and on the
+way back runs a CABAC encoder to regenerate the original bitstream exactly.
+It never decodes the image itself.
+
+## Install
+
+Needs a recent Rust toolchain (1.85 or newer).
+
+```
+git clone https://github.com/47-Cloud/hevcpress
+cd hevcpress
+cargo build --release
+```
+
+The binary ends up in `target/release/hevcpress`.
 
 ## Usage
 
 ```
-cargo build --release
-hevcpress pack   [-j N] files...           # writes <file>.hvp for each, N files in parallel
-hevcpress unpack [-j N] files.hvp...       # restores <file>, byte-identical
-hevcpress view   files.hvp...              # decompress to a temporary copy and open it
-hevcpress compress   in.mov  in.mov.hvp     # single file
-hevcpress decompress in.mov.hvp  out.mov
-hevcpress verify     file...                # compress + check, print sizes
-hevcpress inspect    file...                # NAL / slice-type byte breakdown
-hevcpress syntax [-v] [--cold] file...      # bits per syntax element, CABAC vs model
+hevcpress pack   [-j N] files...      compress each file to <file>.hvp, N at a time
+hevcpress unpack [-j N] files.hvp...  restore the originals
+hevcpress view   files.hvp...         restore a temporary copy and open it
+hevcpress verify files...             compress, check the round trip, print sizes
 ```
 
-`.hvp` files are an archive format: no viewer can open them directly, since the
-bytes are no longer valid HEVC. `view` restores a temporary copy and opens it in
-the default app (Photos/Preview/QuickTime on macOS).
+There are also `compress` / `decompress` for single files, and two tools I used
+while developing it: `inspect` (byte breakdown by NAL unit and slice type) and
+`syntax` (bits per syntax element, CABAC against the model).
 
-`pack` and `unpack` never overwrite an existing file. Every compression checks
-its own round trip before anything is written.
+A `.hvp` file is an archive, not an image: the bytes are no longer valid HEVC,
+so nothing can display it until it is unpacked. That is the price of the
+saving. `view` makes this less annoying.
+
+`pack` and `unpack` never overwrite existing files.
 
 ## Results
 
-| file | original | hevcpress | saving | xz -9e |
-|---|---|---|---|---|
-| IMG_0029.HEIC | 2,201,957 | 2,023,212 | 8.1% | |
-| IMG_0133.HEIC | 1,435,563 | 1,307,651 | 8.9% | |
-| IMG_0283.HEIC | 1,556,848 | 1,424,972 | 8.5% | |
-| IMG_9533.HEIC | 1,726,673 | 1,575,673 | 8.7% | 2.2% |
-| IMG_0029.mov | 2,884,020 | 2,595,562 | 10.0% | |
-| IMG_0133.mov | 3,989,550 | 3,461,379 | 13.2% | |
-| IMG_0283.mov | 1,203,420 | 1,040,825 | 13.5% | |
-| IMG_9533.mov | 4,288,293 | 3,809,629 | 11.2% | 1.6% |
-| **total** | 19,286,324 | 17,238,903 | **10.6%** | |
+Eight files from an iPhone: four photos and their Live Photo videos.
 
-xz -9e saves 3.6% on the first six files. IMG_9533 was added after the model
-was tuned, so it is an out-of-sample check. Every file round-trips byte-exact;
-`compress` checks this itself and falls back to plain xz (or stores the bytes)
-if anything does not verify.
+| file | original | hevcpress | saving |
+|---|---:|---:|---:|
+| IMG_0029.HEIC | 2,201,957 | 2,023,216 | 8.1% |
+| IMG_0133.HEIC | 1,435,563 | 1,307,655 | 8.9% |
+| IMG_0283.HEIC | 1,556,848 | 1,424,976 | 8.5% |
+| IMG_9533.HEIC | 1,726,673 | 1,575,677 | 8.7% |
+| IMG_0029.mov | 2,884,020 | 2,595,566 | 10.0% |
+| IMG_0133.mov | 3,989,550 | 3,461,383 | 13.2% |
+| IMG_0283.mov | 1,203,420 | 1,040,829 | 13.5% |
+| IMG_9533.mov | 4,288,293 | 3,809,633 | 11.2% |
+| total | 19,286,324 | 17,238,935 | 10.6% |
 
-About 4% of each compressed HEIC is metadata the model leaves to xz. Most of it
-is a binary plist with a grid of 16-bit floats (Apple tone-mapping data), which
-is close to incompressible: a dedicated model would gain about 0.3%.
+The IMG_9533 pair was added after the model was tuned, as a check that it
+wasn't fitted to the other six. Videos do better than photos for two reasons:
+the motion and mode syntax in P and B frames leaves the model more to work
+with, and the audio is uncompressed PCM, which gets its own predictor (it ends
+up 15-27% smaller than FLAC -8).
 
-## Comparison with other compressors
+How it compares with general-purpose compressors on the same eight files, each
+at its strongest setting:
 
-Same eight files, each tool at its strongest practical setting, built from
-current sources (2026-10). Savings are against the original files.
-
-| tool | saving (all 8 files, 19.3 MB) |
-|---|---|
-| **hevcpress** | **10.62%** |
+| tool | saving |
+|---|---:|
+| hevcpress | 10.62% |
 | zpaq -m5 | 3.38% |
 | 7-Zip 23.01, LZMA2 -mx9 | 2.96% |
 | xz -9e | 2.95% |
@@ -66,70 +77,84 @@ current sources (2026-10). Savings are against the original files.
 | zstd --ultra -22 --long=27 | 2.43% |
 | 7-Zip 23.01, PPMd -mx9 | 0.42% |
 
-The strongest general-purpose context mixers are too slow to run on the whole
-set, so paq8px was measured on one file:
+paq8px -8 was too slow for the whole set (about 2 KB/s), but on IMG_0133.HEIC
+it saved 3.97% in 590 seconds, against 8.91% in about 6.5 seconds for
+hevcpress. Since paq8px is close to the limit of what generic modelling can do,
+the gap really does come from understanding the format.
 
-| IMG_0133.HEIC (1,435,563 bytes) | compressed | saving | time |
-|---|---|---|---|
-| **hevcpress** | 1,307,651 | **8.91%** | about 6.5 s |
-| paq8px -8 | 1,378,634 | 3.97% | 590 s |
-| zpaq -m5 | 1,394,045 | 2.89% | 8.6 s |
-| xz -9e | 1,398,964 | 2.55% | 0.5 s |
+To run the comparison on your own files: `scripts/bench.sh file...`
 
-paq8px is close to the ceiling of what generic compression can do, so the gap
-comes from understanding the HEVC bitstream rather than from a stronger
-general model. cmix was not run (it needs 32 GB of RAM); precomp was not run
-because it has nothing to unpack in HEIC/MOV files and falls back to LZMA.
-
-No public tool losslessly recompresses HEVC that we could find. Dropbox's
-avrecode/losslessh264 did this for H.264 (deprecated, and limited to CAVLC
-streams); Lepton and JPEG XL do it for JPEG, where Huffman coding leaves far
-more slack than HEVC's CABAC.
+Speed, on a 2019 MacBook Pro (8-core i9): about 6.5 s to compress a 1.5 MB
+photo and 2.5 s to restore it; about 20 s and 7 s for a 4.3 MB video.
+Compression time includes a full verification pass.
 
 ## How it works
 
-1. **Container** (`bmff.rs`): finds the HEVC samples in `.mov` / HEIF files, and
-   the PCM audio track.
-2. **Parser** (`ctu.rs`, `ps.rs`): a full HEVC slice-data parser (I/P/B slices,
-   wavefront parallel processing, 4:2:0 and 4:0:0, 8/10 bit). It reads the
-   CABAC-coded bins but never reconstructs pixels.
-3. **Model** (`model.rs`): each bin is predicted by mixing several hashed
-   contexts (neighbouring blocks, coefficient neighbourhoods, QP, intra modes,
-   ...). Integer arithmetic only, with hard-coded tables (`tables.rs`), so the
-   decoder reproduces probabilities exactly on any machine.
-4. **Round trip** (`cabac_enc.rs`, `codec.rs`): the decompressor decodes bins
-   from the model stream and re-encodes them with a CABAC encoder to regenerate
-   the original slice bytes. During compression every slice is replayed through
-   that encoder and compared with the original; a slice that does not
-   reproduce exactly is simply left untouched in the file.
-5. **Audio** (`audio.rs`): PCM audio gets a cascaded NLMS predictor, coded with
-   the same model. It is about 15-27% smaller than FLAC -8 on the samples.
-6. Everything else (container boxes, parameter sets, slice headers, metadata
-   tracks) is stored in an xz block.
+`bmff.rs` reads the ISO-BMFF container (MOV or HEIF) and finds the HEVC samples
+and the PCM audio. `ps.rs` and `ctu.rs` are an HEVC slice-data parser: I, P and
+B slices, wavefront parallel processing (which Apple's encoder uses), 4:2:0 and
+monochrome, 8 and 10 bit. The parser reads every CABAC bin but stops there; it
+has no prediction, transforms or loop filters.
+
+Each bin is then coded with the model in `model.rs`, which mixes predictions
+from a dozen or so hashed contexts: neighbouring blocks, already-decoded
+coefficients, QP, intra modes, CTU position and so on. The model is integer-only
+with fixed lookup tables, because the decompressor has to reproduce every
+probability exactly on any machine.
+
+Decompression runs the same parser, takes the bins from the model instead of
+from CABAC, and feeds them to a CABAC encoder (`cabac_enc.rs`) that rebuilds
+the original slice data. To make sure that is safe, compression replays every
+slice through that encoder first. A slice that doesn't come back identical is
+left in the file as it is.
+
+Everything that isn't slice data (container boxes, parameter sets, slice
+headers, metadata tracks) goes into an xz-compressed block.
 
 ## Safety
 
-- Every file stores a CRC-32 of the original, checked after decompression:
-  corruption or a bug gives an error, never wrong output.
-- The header carries a format version (`HVP2`). The compressed stream can only
-  be decoded by the exact model that wrote it, so the version must be bumped
-  whenever the model or its contexts change; a build refuses formats it does not
-  know instead of producing garbage. Format 1 files (no checksum, same model)
-  are still read.
-- The model must never use floating point or anything platform dependent:
-  a different probability in the decompressor corrupts the file silently.
-- `compress` decompresses its own output and compares it with the input.
-- Unsupported or malformed input (tiles, PCM coding units, 4:2:2/4:4:4,
-  truncated files, non-HEVC data) falls back to xz.
+- Every compressed file carries a CRC-32 of the original, checked on
+  decompression. A corrupt file or a bug produces an error, not a wrong file.
+- `compress` decompresses its own output and compares it with the input
+  before writing anything. If that fails, it falls back to plain xz.
+- The header has a format version. The bin stream can only be decoded by the
+  exact model that wrote it, so the version must change whenever the model
+  does, and a build refuses formats it doesn't know.
+- Inputs it doesn't understand (tiles, PCM coding units, 4:2:2 or 4:4:4
+  chroma, some range-extension tools, truncated or non-HEVC files) fall back
+  to xz.
 
-## Not supported (falls back)
+Still, this is young software with its own file format. I wouldn't delete the
+originals of anything irreplaceable on the strength of it.
 
-Tiles, PCM coding units, 4:2:2 / 4:4:4 chroma, extended-precision and
-bypass-alignment profiles, cross-component prediction.
+## Things that didn't work
 
-## Speed
+Worth recording, since some of them looked promising:
 
-On an 8-core i9 (2019 MacBook Pro): a 1.5 MB HEIC compresses in about 6.5 s
-and decompresses in 2.5 s; a 4.3 MB Live Photo video in about 20 s and 7 s.
-Compression includes a full verifying decompression. `pack` runs files in
-parallel, so all eight sample files take about 24 s.
+- Making the mixer bigger, adding a second weight set, or tuning learning
+  rates: a few tenths of a percent at most.
+- Warm-starting the model from other files: no gain, it learns fast enough
+  within one file.
+- Context from the previous frame's coefficient activity: nothing.
+- Pixel-domain context. I decoded the pictures with ffmpeg and gave the model
+  the texture and edge direction of the already-decoded neighbourhood. It
+  saved 0.05-0.12%, because the neighbouring blocks' coefficients already
+  carry the same information. A full decoder for sign prediction and
+  template-based intra modes might add a point or two, which didn't seem worth
+  writing a complete HEVC decoder for.
+- Re-encoding Apple's tone-map metadata in the HEIC, a binary plist of 16-bit
+  floats: about 0.3%, and dependent on an undocumented format.
+
+## Credits and notes
+
+The CABAC tables and syntax come from ITU-T H.265. I cross-checked the tables
+against FFmpeg's HEVC decoder. Dropbox's Lepton (for JPEG) and avrecode (for
+H.264) showed that this kind of recompression is worth doing.
+
+hevcpress parses and regenerates HEVC bitstreams (the entropy-coding layer
+only; it does not decode images). HEVC is covered by patent licensing
+programmes, and commercial use may require a licence.
+
+## License
+
+MIT or Apache-2.0, at your option.
