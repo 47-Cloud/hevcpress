@@ -45,7 +45,11 @@ pub fn children(data: &[u8], start: usize, end: usize) -> Vec<BoxRef> {
         if size < header as u64 || box_end > end {
             break;
         }
-        out.push(BoxRef { kind, body: pos + header, end: box_end });
+        out.push(BoxRef {
+            kind,
+            body: pos + header,
+            end: box_end,
+        });
         pos = box_end;
     }
     out
@@ -74,7 +78,10 @@ pub fn parse_hvcc(d: &[u8]) -> Option<Config> {
     if d.len() < 23 {
         return None;
     }
-    let mut cfg = Config { nal_len_size: (d[21] & 3) as usize + 1, param_sets: Vec::new() };
+    let mut cfg = Config {
+        nal_len_size: (d[21] & 3) as usize + 1,
+        param_sets: Vec::new(),
+    };
     let mut p = 23;
     for _ in 0..d[22] {
         if p + 3 > d.len() {
@@ -120,9 +127,15 @@ pub fn extract(data: &[u8]) -> Result<Extracted, String> {
 }
 
 fn extract_mov(data: &[u8], moov: BoxRef) -> Result<Extracted, String> {
-    let mut ex = Extracted { configs: Vec::new(), units: Vec::new() };
+    let mut ex = Extracted {
+        configs: Vec::new(),
+        units: Vec::new(),
+    };
     let mut track = 0;
-    for trak in children(data, moov.body, moov.end).into_iter().filter(|b| &b.kind == b"trak") {
+    for trak in children(data, moov.body, moov.end)
+        .into_iter()
+        .filter(|b| &b.kind == b"trak")
+    {
         track += 1;
         let Some(stbl) = (|| {
             let mdia = find(&children(data, trak.body, trak.end), b"mdia")?;
@@ -151,13 +164,21 @@ fn extract_mov(data: &[u8], moov: BoxRef) -> Result<Extracted, String> {
         let b = &data[stsz.body..stsz.end];
         let (fixed, count) = (be32(&b[4..]) as usize, be32(&b[8..]) as usize);
         let sizes: Vec<usize> = (0..count)
-            .map(|i| if fixed != 0 { fixed } else { be32(&b[12 + 4 * i..]) as usize })
+            .map(|i| {
+                if fixed != 0 {
+                    fixed
+                } else {
+                    be32(&b[12 + 4 * i..]) as usize
+                }
+            })
             .collect();
 
         // Chunk offsets.
         let chunk_offsets: Vec<u64> = if let Some(co) = find(&st, b"stco") {
             let b = &data[co.body..co.end];
-            (0..be32(&b[4..]) as usize).map(|i| be32(&b[8 + 4 * i..]) as u64).collect()
+            (0..be32(&b[4..]) as usize)
+                .map(|i| be32(&b[8 + 4 * i..]) as u64)
+                .collect()
         } else if let Some(co) = find(&st, b"co64") {
             let b = &data[co.body..co.end];
             (0..be32(&b[4..]) as usize).map(|i| be64(&b[8 + 8 * i..])).collect()
@@ -180,7 +201,12 @@ fn extract_mov(data: &[u8], moov: BoxRef) -> Result<Extracted, String> {
             let mut pos = off as usize;
             for _ in 0..per_chunk {
                 let Some(&len) = sizes.get(sample) else { break };
-                ex.units.push(Unit { label: label.clone(), start: pos, len, config });
+                ex.units.push(Unit {
+                    label: label.clone(),
+                    start: pos,
+                    len,
+                    config,
+                });
                 pos += len;
                 sample += 1;
             }
@@ -201,7 +227,11 @@ fn extract_heif(data: &[u8], meta: BoxRef) -> Result<Extracted, String> {
         let b = &data[infe.body..infe.end];
         let v = b[0];
         if v >= 2 {
-            let (id, rest) = if v == 2 { (be16(&b[4..]), 8) } else { (be32(&b[4..]), 10) };
+            let (id, rest) = if v == 2 {
+                (be16(&b[4..]), 8)
+            } else {
+                (be32(&b[4..]), 10)
+            };
             item_type.insert(id, b[rest..rest + 4].try_into().unwrap());
         }
     }
@@ -217,7 +247,15 @@ fn extract_heif(data: &[u8], meta: BoxRef) -> Result<Extracted, String> {
     let mut p = 8;
     let mut item_props: HashMap<u32, Vec<usize>> = HashMap::new();
     for _ in 0..be32(&b[4..]) {
-        let id = if ver < 1 { let v = be16(&b[p..]); p += 2; v } else { let v = be32(&b[p..]); p += 4; v };
+        let id = if ver < 1 {
+            let v = be16(&b[p..]);
+            p += 2;
+            v
+        } else {
+            let v = be32(&b[p..]);
+            p += 4;
+            v
+        };
         let n = b[p] as usize;
         p += 1;
         let mut v = Vec::new();
@@ -239,12 +277,27 @@ fn extract_heif(data: &[u8], meta: BoxRef) -> Result<Extracted, String> {
     let ver = b[0];
     let (off_sz, len_sz) = ((b[4] >> 4) as usize, (b[4] & 15) as usize);
     let (base_sz, idx_sz) = ((b[5] >> 4) as usize, if ver >= 1 { (b[5] & 15) as usize } else { 0 });
-    let (count, mut p) = if ver < 2 { (be16(&b[6..]), 8) } else { (be32(&b[6..]), 10) };
+    let (count, mut p) = if ver < 2 {
+        (be16(&b[6..]), 8)
+    } else {
+        (be32(&b[6..]), 10)
+    };
 
-    let mut ex = Extracted { configs: Vec::new(), units: Vec::new() };
+    let mut ex = Extracted {
+        configs: Vec::new(),
+        units: Vec::new(),
+    };
     let mut cfg_index: HashMap<usize, usize> = HashMap::new(); // hvcC prop index -> config
     for _ in 0..count {
-        let id = if ver < 2 { let v = be16(&b[p..]); p += 2; v } else { let v = be32(&b[p..]); p += 4; v };
+        let id = if ver < 2 {
+            let v = be16(&b[p..]);
+            p += 2;
+            v
+        } else {
+            let v = be32(&b[p..]);
+            p += 4;
+            v
+        };
         let mut method = 0;
         if ver >= 1 {
             method = be16(&b[p..]) & 15;
@@ -269,7 +322,10 @@ fn extract_heif(data: &[u8], meta: BoxRef) -> Result<Extracted, String> {
             continue;
         }
         let ps = item_props.get(&id).cloned().unwrap_or_default();
-        let Some(&hv) = ps.iter().find(|&&i| i >= 1 && props.get(i - 1).is_some_and(|b| &b.kind == b"hvcC")) else {
+        let Some(&hv) = ps
+            .iter()
+            .find(|&&i| i >= 1 && props.get(i - 1).is_some_and(|b| &b.kind == b"hvcC"))
+        else {
             continue;
         };
         let config = match cfg_index.get(&hv) {
@@ -289,7 +345,12 @@ fn extract_heif(data: &[u8], meta: BoxRef) -> Result<Extracted, String> {
             Some((w, h)) => format!("heic item hvc1 {w}x{h}"),
             None => "heic item hvc1".into(),
         };
-        ex.units.push(Unit { label, start: ranges[0].0 as usize, len: ranges[0].1 as usize, config });
+        ex.units.push(Unit {
+            label,
+            start: ranges[0].0 as usize,
+            len: ranges[0].1 as usize,
+            config,
+        });
     }
     Ok(ex)
 }
@@ -305,7 +366,10 @@ pub struct Audio {
 pub fn extract_audio(data: &[u8]) -> Option<Audio> {
     let top = children(data, 0, data.len());
     let moov = find(&top, b"moov")?;
-    for trak in children(data, moov.body, moov.end).into_iter().filter(|b| &b.kind == b"trak") {
+    for trak in children(data, moov.body, moov.end)
+        .into_iter()
+        .filter(|b| &b.kind == b"trak")
+    {
         let mdia = find(&children(data, trak.body, trak.end), b"mdia")?;
         let minf = find(&children(data, mdia.body, mdia.end), b"minf")?;
         let stbl = find(&children(data, minf.body, minf.end), b"stbl")?;
@@ -319,7 +383,11 @@ pub fn extract_audio(data: &[u8]) -> Option<Audio> {
             b"lpcm" if b.len() >= 64 && be16(&b[8..]) == 2 => {
                 let (ch, bits, flags) = (be32(&b[40..]), be32(&b[48..]), be32(&b[52..]));
                 // Integer (not float), little-endian.
-                if bits == 16 && flags & 3 == 0 { ch as usize } else { continue }
+                if bits == 16 && flags & 3 == 0 {
+                    ch as usize
+                } else {
+                    continue;
+                }
             }
             _ => continue,
         };
@@ -330,15 +398,22 @@ pub fn extract_audio(data: &[u8]) -> Option<Audio> {
         let stsz = find(&st, b"stsz")?;
         let z = &data[stsz.body..stsz.end];
         let (fixed, count) = (be32(&z[4..]) as usize, be32(&z[8..]) as usize);
-        let size_of = |i: usize| if fixed != 0 { fixed } else { be32(&z[12 + 4 * i..]) as usize };
+        let size_of = |i: usize| {
+            if fixed != 0 {
+                fixed
+            } else {
+                be32(&z[12 + 4 * i..]) as usize
+            }
+        };
         let chunk_offsets: Vec<u64> = if let Some(co) = find(&st, b"stco") {
             let c = &data[co.body..co.end];
-            (0..be32(&c[4..]) as usize).map(|i| be32(&c[8 + 4 * i..]) as u64).collect()
-        } else if let Some(co) = find(&st, b"co64") {
+            (0..be32(&c[4..]) as usize)
+                .map(|i| be32(&c[8 + 4 * i..]) as u64)
+                .collect()
+        } else {
+            let co = find(&st, b"co64")?;
             let c = &data[co.body..co.end];
             (0..be32(&c[4..]) as usize).map(|i| be64(&c[8 + 8 * i..])).collect()
-        } else {
-            return None;
         };
         let stsc = find(&st, b"stsc")?;
         let c = &data[stsc.body..stsc.end];

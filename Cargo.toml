@@ -2,6 +2,17 @@
 name = "hevcpress"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Lossless recompression of HEIC photos and HEVC video (iPhone Live Photos): about 10% smaller, restored bit for bit"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/47-Cloud/hevcpress"
+readme = "README.md"
+keywords = ["hevc", "heic", "compression", "lossless", "cabac"]
+categories = ["compression", "multimedia::images", "multimedia::video", "command-line-utilities"]
 
 [dependencies]
 xz2 = "0.1.7"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

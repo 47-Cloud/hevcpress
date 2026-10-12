@@ -17,7 +17,11 @@ pub struct Mc {
 
 impl Mc {
     pub fn new(sel: usize) -> Mc {
-        Mc { n: 0, h: [0; MAXIN], sel }
+        Mc {
+            n: 0,
+            h: [0; MAXIN],
+            sel,
+        }
     }
 
     pub fn add(&mut self, parts: &[u32]) -> &mut Self {
@@ -55,14 +59,8 @@ struct Entry {
     n: u16,
 }
 
-/// Mixer learning-rate multiplier in sixteenths, per syntax element category.
-fn lr_scale(cat: usize) -> i64 {
-    16 + 0 * cat as i64
-}
-
 #[derive(Default)]
 struct Scratch {
-    cat: usize,
     set: usize,
     n: usize,
     idx: [u32; MAXIN],
@@ -86,9 +84,22 @@ fn stretch(p16: u16) -> i32 {
 impl Model {
     pub fn new() -> Model {
         Model {
-            t: vec![Entry { p: 32768, f: 32768, n: 0 }; 1 << TBITS],
+            t: vec![
+                Entry {
+                    p: 32768,
+                    f: 32768,
+                    n: 0
+                };
+                1 << TBITS
+            ],
             w: (0..NCAT * NSEL * NIN)
-                .map(|i| if i / (NSEL * NIN) == crate::cabac::Cat::CoeffSign as usize { W_INIT / 6 } else { W_INIT })
+                .map(|i| {
+                    if i / (NSEL * NIN) == crate::cabac::Cat::CoeffSign as usize {
+                        W_INIT / 6
+                    } else {
+                        W_INIT
+                    }
+                })
                 .collect(),
             wn: vec![0; NCAT * NSEL],
             recip: (0..=LIMIT as i32).map(|n| 65536 / (n + 2)).collect(),
@@ -101,7 +112,6 @@ impl Model {
         let set = cat * NSEL + (mc.sel % NSEL);
         let wb = set * NIN;
         let s = &mut self.s;
-        s.cat = cat;
         s.set = set;
         s.n = mc.n;
         let mut dot: i64 = 0;
@@ -130,7 +140,7 @@ impl Model {
         let err = ((bin as i64) << 16) - s.p as i64;
         let cnt = self.wn[s.set];
         self.wn[s.set] = cnt.saturating_add(1);
-        let lr = (LR_MIN + LR_BOOST * 50 / (50 + cnt as i64)) * lr_scale(s.cat) / 16;
+        let lr = LR_MIN + LR_BOOST * 50 / (50 + cnt as i64);
         for i in 0..=ni {
             self.w[wb + i] += ((lr * err * s.st[i] as i64) >> 24) as i32;
         }

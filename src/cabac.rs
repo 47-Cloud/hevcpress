@@ -2,7 +2,7 @@
 
 use crate::cabac_enc::CabacEnc;
 use crate::coder::{Decoder, Encoder};
-use crate::model::{cost_bits, Mc, Model};
+use crate::model::{Mc, Model, cost_bits};
 use std::sync::OnceLock;
 
 /// Context index layout (same order as the init tables below).
@@ -38,8 +38,6 @@ pub mod ctx {
     pub const SIG_COEFF: usize = 93;
     pub const GT1: usize = 137;
     pub const GT2: usize = 161;
-    pub const LOG2_RES_SCALE: usize = 167;
-    pub const RES_SCALE_SIGN: usize = 175;
     pub const CU_CHROMA_QP_OFFSET_FLAG: usize = 177;
     pub const CU_CHROMA_QP_OFFSET_IDX: usize = 178;
     pub const COUNT: usize = 179;
@@ -181,14 +179,46 @@ pub enum Cat {
 pub const NCAT: usize = Cat::Pcm as usize + 1;
 
 pub const CAT_NAMES: [&str; NCAT] = [
-    "sao_merge", "sao_type_idx", "sao_offset_abs", "sao_band_position", "sao_eo_class", "end_of_slice",
-    "split_cu_flag", "cu_transquant_bypass", "cu_skip_flag", "pred_mode_flag", "part_mode",
-    "prev_intra_luma_pred", "mpm_idx", "rem_intra_luma_pred", "intra_chroma_pred_mode", "merge_flag",
-    "merge_idx", "inter_pred_idc", "ref_idx", "mvd_greater0", "mvd_greater1", "mvd_abs_minus2", "mvd_sign",
-    "mvp_flag", "rqt_root_cbf", "split_transform_flag", "cbf_luma", "cbf_cb_cr", "cu_qp_delta",
-    "cu_chroma_qp_offset", "transform_skip_flag", "last_sig_coeff_prefix", "last_sig_coeff_suffix",
-    "coded_sub_block_flag", "sig_coeff_flag", "coeff_abs_greater1", "coeff_abs_greater2", "coeff_sign",
-    "coeff_abs_level_remaining", "pcm_flag",
+    "sao_merge",
+    "sao_type_idx",
+    "sao_offset_abs",
+    "sao_band_position",
+    "sao_eo_class",
+    "end_of_slice",
+    "split_cu_flag",
+    "cu_transquant_bypass",
+    "cu_skip_flag",
+    "pred_mode_flag",
+    "part_mode",
+    "prev_intra_luma_pred",
+    "mpm_idx",
+    "rem_intra_luma_pred",
+    "intra_chroma_pred_mode",
+    "merge_flag",
+    "merge_idx",
+    "inter_pred_idc",
+    "ref_idx",
+    "mvd_greater0",
+    "mvd_greater1",
+    "mvd_abs_minus2",
+    "mvd_sign",
+    "mvp_flag",
+    "rqt_root_cbf",
+    "split_transform_flag",
+    "cbf_luma",
+    "cbf_cb_cr",
+    "cu_qp_delta",
+    "cu_chroma_qp_offset",
+    "transform_skip_flag",
+    "last_sig_coeff_prefix",
+    "last_sig_coeff_suffix",
+    "coded_sub_block_flag",
+    "sig_coeff_flag",
+    "coeff_abs_greater1",
+    "coeff_abs_greater2",
+    "coeff_sign",
+    "coeff_abs_level_remaining",
+    "pcm_flag",
 ];
 
 /// Bits spent, split by whether the bin was context coded or bypass.
@@ -203,7 +233,12 @@ pub struct Stats {
 
 impl Default for Stats {
     fn default() -> Self {
-        Stats { ctx_bins: [0; NCAT], ctx_bits: [0.0; NCAT], bypass_bins: [0; NCAT], model_bits: [0.0; NCAT] }
+        Stats {
+            ctx_bins: [0; NCAT],
+            ctx_bits: [0.0; NCAT],
+            bypass_bins: [0; NCAT],
+            model_bits: [0.0; NCAT],
+        }
     }
 }
 
@@ -307,8 +342,8 @@ impl<'a> Cabac<'a> {
     /// Initialise context variables for a slice.
     pub fn init_contexts(&mut self, init_type: usize, slice_qp: i32) {
         let qp = slice_qp.clamp(0, 51);
-        for i in 0..NUM_CTX {
-            let v = INIT_VALUES[init_type][i] as i32;
+        for (i, &init) in INIT_VALUES[init_type].iter().enumerate() {
+            let v = init as i32;
             let m = (v >> 4) * 5 - 45;
             let n = ((v & 15) << 3) - 16;
             let pre = (((m * qp) >> 4) + n).clamp(1, 126);
@@ -318,7 +353,10 @@ impl<'a> Cabac<'a> {
     }
 
     pub fn save_contexts(&self) -> SavedState {
-        SavedState { state: self.state, mps: self.mps }
+        SavedState {
+            state: self.state,
+            mps: self.mps,
+        }
     }
 
     pub fn restore_contexts(&mut self, s: &SavedState) {

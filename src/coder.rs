@@ -9,7 +9,11 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new() -> Encoder {
-        Encoder { x1: 0, x2: 0xFFFF_FFFF, out: Vec::new() }
+        Encoder {
+            x1: 0,
+            x2: 0xFFFF_FFFF,
+            out: Vec::new(),
+        }
     }
 
     /// Encode `bin` given P(bin = 1) = p16 / 65536, with 0 < p16 < 65536.
@@ -43,7 +47,13 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(data: Vec<u8>) -> Decoder {
-        let mut d = Decoder { x1: 0, x2: 0xFFFF_FFFF, x: 0, data, pos: 0 };
+        let mut d = Decoder {
+            x1: 0,
+            x2: 0xFFFF_FFFF,
+            x: 0,
+            data,
+            pos: 0,
+        };
         for _ in 0..4 {
             d.x = (d.x << 8) | d.next_byte();
         }

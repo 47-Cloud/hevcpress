@@ -16,9 +16,9 @@ use crate::bits::unescape;
 use crate::bmff::{self, Config};
 use crate::cabac::{Cabac, Io};
 use crate::coder::{Decoder, Encoder};
-use crate::ctu::{decode_slice, Pic};
+use crate::ctu::{Pic, decode_slice};
 use crate::model::Model;
-use crate::ps::{parse_slice_header, ParamSets, SliceHeader};
+use crate::ps::{ParamSets, SliceHeader, parse_slice_header};
 use std::io::{Read, Write};
 
 /// File header: "HVP" + format version (an ASCII digit), then the mode byte.
@@ -45,7 +45,9 @@ pub fn crc32(data: &[u8]) -> u32 {
         }
         t
     });
-    !data.iter().fold(!0u32, |c, &b| t[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8))
+    !data
+        .iter()
+        .fold(!0u32, |c, &b| t[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8))
 }
 
 /// Wrap a body (mode byte + payload) in the current header.
@@ -213,11 +215,18 @@ impl Meta {
             for _ in 0..r.v()? {
                 param_sets.push(r.bytes()?.to_vec());
             }
-            configs.push(Config { nal_len_size, param_sets });
+            configs.push(Config {
+                nal_len_size,
+                param_sets,
+            });
         }
         let mut events = Vec::new();
         for _ in 0..r.v()? {
-            events.push(Event { before: r.v()? as usize, config: r.v()? as usize, nal: r.bytes()?.to_vec() });
+            events.push(Event {
+                before: r.v()? as usize,
+                config: r.v()? as usize,
+                nal: r.bytes()?.to_vec(),
+            });
         }
         let mut slices = Vec::new();
         for _ in 0..r.v()? {
@@ -242,7 +251,14 @@ impl Meta {
             audio_runs.push((r.v()? as usize, r.v()? as usize));
         }
         let skeleton = r.bytes()?.to_vec();
-        Ok(Meta { configs, events, slices, audio_channels, audio_runs, skeleton })
+        Ok(Meta {
+            configs,
+            events,
+            slices,
+            audio_channels,
+            audio_runs,
+            skeleton,
+        })
     }
 }
 
@@ -261,7 +277,11 @@ fn new_states(configs: &[Config]) -> Vec<ConfigState> {
             for nal in &c.param_sets {
                 ps.absorb(nal);
             }
-            ConfigState { ps, pic: None, prev: None }
+            ConfigState {
+                ps,
+                pic: None,
+                prev: None,
+            }
         })
         .collect()
 }
@@ -288,7 +308,13 @@ pub struct Report {
 /// Compress `data`. Always succeeds: anything that cannot be modelled falls
 /// back to plain xz. The result is verified by decompressing it again.
 pub fn compress(data: &[u8], verify: bool) -> (Vec<u8>, Report) {
-    let mut report = Report { slices_total: 0, slices_coded: 0, skeleton_bytes: 0, meta_bytes: 0, stream_bytes: 0 };
+    let mut report = Report {
+        slices_total: 0,
+        slices_coded: 0,
+        skeleton_bytes: 0,
+        meta_bytes: 0,
+        stream_bytes: 0,
+    };
     // Container parsing sees arbitrary bytes: any panic means "not something we understand".
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_compress(data, &mut report)))
         .unwrap_or_else(|_| Err("malformed container".into()));
@@ -318,7 +344,11 @@ pub fn compress(data: &[u8], verify: bool) -> (Vec<u8>, Report) {
     };
     // Compressing the whole file with xz just to compare is slow; the model
     // output only loses when the file was not really HEVC, so check against size.
-    if out.len() >= data.len() { (fallback(data), report) } else { (out, report) }
+    if out.len() >= data.len() {
+        (fallback(data), report)
+    } else {
+        (out, report)
+    }
 }
 
 fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
@@ -331,7 +361,11 @@ fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
 
     for unit in &ex.units {
         let n = ex.configs[unit.config].nal_len_size;
-        let end = unit.start.checked_add(unit.len).filter(|&e| e <= data.len()).ok_or("sample extends past the end of the file")?;
+        let end = unit
+            .start
+            .checked_add(unit.len)
+            .filter(|&e| e <= data.len())
+            .ok_or("sample extends past the end of the file")?;
         let bytes = &data[unit.start..end];
         let st = &mut states[unit.config];
         let mut pos = 0;
@@ -347,7 +381,11 @@ fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
             let t = (nal[0] >> 1) & 0x3f;
 
             if t == 33 || t == 34 {
-                events.push(Event { before: slices.len(), config: unit.config, nal: nal.to_vec() });
+                events.push(Event {
+                    before: slices.len(),
+                    config: unit.config,
+                    nal: nal.to_vec(),
+                });
                 st.ps.absorb(nal);
                 continue;
             }
@@ -370,7 +408,11 @@ fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
     if let Some(a) = bmff::extract_audio(data) {
         let mut samples = Vec::new();
         for &(off, len) in &a.runs {
-            samples.extend(data[off..off + len].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])));
+            samples.extend(
+                data[off..off + len]
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]])),
+            );
         }
         audio::encode(&samples, a.channels, &mut model, &mut enc);
         audio_channels = a.channels;
@@ -393,7 +435,15 @@ fn try_compress(data: &[u8], report: &mut Report) -> Result<Vec<u8>, String> {
     skeleton.extend_from_slice(&data[at..]);
 
     report.skeleton_bytes = skeleton.len();
-    let meta = Meta { configs: ex.configs, events, slices, audio_channels, audio_runs, skeleton }.write();
+    let meta = Meta {
+        configs: ex.configs,
+        events,
+        slices,
+        audio_channels,
+        audio_runs,
+        skeleton,
+    }
+    .write();
     let meta_xz = xz_compress(&meta);
     let stream = enc.finish();
     report.meta_bytes = meta_xz.len();
@@ -436,11 +486,16 @@ fn code_slice(
     if escape(&rbsp) != nal[2..] {
         return Ok(None);
     }
-    let Ok(sh) = parse_slice_header(nal_type, &rbsp, &st.ps, st.prev.as_ref()) else { return Ok(None) };
+    let Ok(sh) = parse_slice_header(nal_type, &rbsp, &st.ps, st.prev.as_ref()) else {
+        return Ok(None);
+    };
     if sh.data_offset >= rbsp.len() {
         return Ok(None);
     }
-    let (Some(pps), Some(sps)) = (st.ps.pps.get(&sh.pps_id), st.ps.pps.get(&sh.pps_id).and_then(|p| st.ps.sps.get(&p.sps_id))) else {
+    let (Some(pps), Some(sps)) = (
+        st.ps.pps.get(&sh.pps_id),
+        st.ps.pps.get(&sh.pps_id).and_then(|p| st.ps.sps.get(&p.sps_id)),
+    ) else {
         return Ok(None);
     };
     let payload = &rbsp[sh.data_offset..];
@@ -454,12 +509,16 @@ fn code_slice(
     // Pass 1: decode the original data and record the bins.
     let mut cabac = Cabac::new(Io::Analyze, payload, None);
     cabac.rec = Some(Vec::new());
-    let Ok((_, mut cabac)) = decode_slice(sps, pps, &sh, &mut base.clone(), cabac) else { return Ok(None) };
+    let Ok((_, mut cabac)) = decode_slice(sps, pps, &sh, &mut base.clone(), cabac) else {
+        return Ok(None);
+    };
     let Some(bins) = cabac.rec.take() else { return Ok(None) };
 
     // Pass 2: re-encode the bins and check we get the original bytes back.
     let replay = Cabac::new(Io::Replay(&bins, 0), &[], None);
-    let Ok((_, replay)) = decode_slice(sps, pps, &sh, &mut base.clone(), replay) else { return Ok(None) };
+    let Ok((_, replay)) = decode_slice(sps, pps, &sh, &mut base.clone(), replay) else {
+        return Ok(None);
+    };
     let produced = replay.finish_encoded();
     if !payload.starts_with(&produced) {
         return Ok(None);
@@ -472,7 +531,8 @@ fn code_slice(
     // Pass 3: the real thing, with the shared model and coder.
     let mut pic = base;
     let cabac = Cabac::new(Io::Compress(enc), payload, Some(model));
-    decode_slice(sps, pps, &sh, &mut pic, cabac).map_err(|e| format!("internal error while coding a verified slice: {e}"))?;
+    decode_slice(sps, pps, &sh, &mut pic, cabac)
+        .map_err(|e| format!("internal error while coding a verified slice: {e}"))?;
     st.pic = Some(pic);
     let rec = SliceRec {
         config,
@@ -515,33 +575,6 @@ fn decode_body(mode: u8, payload: &[u8]) -> Result<Vec<u8>, String> {
             .map_err(|e| format!("corrupt or incompatible file ({e})")),
         2 => Ok(payload.to_vec()),
         m => Err(format!("unknown mode {m}")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crc32_check_value() {
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-    }
-
-    #[test]
-    fn header_roundtrip_and_errors() {
-        let data = b"not a video, just some bytes to store".repeat(20);
-        let (comp, _) = compress(&data, true);
-        assert_eq!(&comp[..4], b"HVP2");
-        assert_eq!(decompress(&comp).unwrap(), data);
-
-        let mut bad = comp.clone();
-        let last = bad.len() - 1;
-        bad[last] ^= 1;
-        assert!(decompress(&bad).is_err());
-
-        let mut future = comp.clone();
-        future[3] = b'9';
-        assert!(decompress(&future).unwrap_err().contains("format 9"));
     }
 }
 
@@ -622,4 +655,31 @@ fn decompress_hevc(body: &[u8]) -> Result<Vec<u8>, String> {
         return Err("reconstructed file has the wrong size".into());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_check_value() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn header_roundtrip_and_errors() {
+        let data = b"not a video, just some bytes to store".repeat(20);
+        let (comp, _) = compress(&data, true);
+        assert_eq!(&comp[..4], b"HVP2");
+        assert_eq!(decompress(&comp).unwrap(), data);
+
+        let mut bad = comp.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(decompress(&bad).is_err());
+
+        let mut future = comp.clone();
+        future[3] = b'9';
+        assert!(decompress(&future).unwrap_err().contains("format 9"));
+    }
 }

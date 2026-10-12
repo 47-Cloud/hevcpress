@@ -2,10 +2,10 @@ mod analyze;
 mod audio;
 mod bits;
 mod bmff;
+mod cabac;
 mod cabac_enc;
 mod codec;
 mod coder;
-mod cabac;
 mod ctu;
 mod model;
 mod nal;
@@ -71,26 +71,32 @@ fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Run `job` over `files` on `jobs` threads; returns (input bytes, output bytes, failures).
-fn run_parallel(files: &[String], jobs: usize, job: impl Fn(&str) -> Result<(usize, usize), String> + Sync) -> (u64, u64, usize) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn run_parallel(
+    files: &[String],
+    jobs: usize,
+    job: impl Fn(&str) -> Result<(usize, usize), String> + Sync,
+) -> (u64, u64, usize) {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
     let totals = Mutex::new((0u64, 0u64, 0usize));
     std::thread::scope(|sc| {
         for _ in 0..jobs.max(1).min(files.len().max(1)) {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(f) = files.get(i) else { break };
-                let r = job(f);
-                let mut t = totals.lock().unwrap();
-                match r {
-                    Ok((a, b)) => {
-                        t.0 += a as u64;
-                        t.1 += b as u64;
-                    }
-                    Err(e) => {
-                        eprintln!("{f}: {e}");
-                        t.2 += 1;
+            sc.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(f) = files.get(i) else { break };
+                    let r = job(f);
+                    let mut t = totals.lock().unwrap();
+                    match r {
+                        Ok((a, b)) => {
+                            t.0 += a as u64;
+                            t.1 += b as u64;
+                        }
+                        Err(e) => {
+                            eprintln!("{f}: {e}");
+                            t.2 += 1;
+                        }
                     }
                 }
             });
@@ -119,7 +125,9 @@ fn jobs_and_files(args: &[String]) -> (usize, Vec<String>) {
 /// Name for a restored file: `photo.HEIC.hvp` -> `photo.HEIC`; otherwise
 /// guess the extension from the content so the viewer recognises it.
 fn restored_name(path: &str, data: &[u8]) -> String {
-    let base = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
+    let base = std::path::Path::new(path)
+        .file_name()
+        .map_or("file".into(), |n| n.to_string_lossy().into_owned());
     if let Some(stem) = base.strip_suffix(".hvp") {
         return stem.to_string();
     }
@@ -138,13 +146,24 @@ fn view(path: &str) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!(
         "hevcpress-view-{}-{}",
         process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
     ));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let out = dir.join(restored_name(path, &data));
     fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
-    let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-    let status = process::Command::new(opener).arg(&out).status().map_err(|e| format!("{opener}: {e}"))?;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let status = process::Command::new(opener)
+        .arg(&out)
+        .status()
+        .map_err(|e| format!("{opener}: {e}"))?;
     if !status.success() && !cfg!(windows) {
         return Err(format!("{opener} could not open {}", out.display()));
     }
@@ -179,7 +198,13 @@ fn main() {
         Some("compress") if args.len() == 4 => {
             let r = read_file(&args[2]).and_then(|d| {
                 let (c, rep) = codec::compress(&d, true);
-                eprintln!("{} -> {} bytes ({}/{} slices recompressed)", d.len(), c.len(), rep.slices_coded, rep.slices_total);
+                eprintln!(
+                    "{} -> {} bytes ({}/{} slices recompressed)",
+                    d.len(),
+                    c.len(),
+                    rep.slices_coded,
+                    rep.slices_total
+                );
                 fs::write(&args[3], c).map_err(|e| e.to_string())
             });
             if let Err(e) = r {
@@ -188,7 +213,9 @@ fn main() {
             }
         }
         Some("decompress") if args.len() == 4 => {
-            let r = read_file(&args[2]).and_then(|c| codec::decompress(&c)).and_then(|d| fs::write(&args[3], d).map_err(|e| e.to_string()));
+            let r = read_file(&args[2])
+                .and_then(|c| codec::decompress(&c))
+                .and_then(|d| fs::write(&args[3], d).map_err(|e| e.to_string()));
             if let Err(e) = r {
                 eprintln!("{e}");
                 process::exit(1);
@@ -201,7 +228,13 @@ fn main() {
             let mut enc = coder::Encoder::new();
             audio::encode(&samples, 1, &mut model, &mut enc);
             let out = enc.finish();
-            println!("{}: {} -> {} bytes ({:.1}%)", args[2], raw.len(), out.len(), 100.0 * out.len() as f64 / raw.len() as f64);
+            println!(
+                "{}: {} -> {} bytes ({:.1}%)",
+                args[2],
+                raw.len(),
+                out.len(),
+                100.0 * out.len() as f64 / raw.len() as f64
+            );
         }
         Some("pack") if args.len() > 2 => {
             // Compress each file to <file>.hvp, several files at a time.
@@ -278,7 +311,9 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: hevcpress pack|unpack [-j N] files... | view files.hvp... | compress|decompress in out | verify|inspect|syntax files...");
+            eprintln!(
+                "usage: hevcpress pack|unpack [-j N] files... | view files.hvp... | compress|decompress in out | verify|inspect|syntax files..."
+            );
             process::exit(2);
         }
     }

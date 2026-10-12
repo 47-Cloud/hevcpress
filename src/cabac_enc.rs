@@ -13,7 +13,15 @@ pub struct CabacEnc {
 
 impl CabacEnc {
     pub fn new() -> CabacEnc {
-        CabacEnc { low: 0, range: 510, first_bit: true, outstanding: 0, out: Vec::new(), cur: 0, nbits: 0 }
+        CabacEnc {
+            low: 0,
+            range: 510,
+            first_bit: true,
+            outstanding: 0,
+            out: Vec::new(),
+            cur: 0,
+            nbits: 0,
+        }
     }
 
     pub fn range(&self) -> u32 {

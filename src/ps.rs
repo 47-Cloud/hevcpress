@@ -1,7 +1,7 @@
 //! HEVC parameter sets (SPS, PPS) and slice segment headers, parsed far
 //! enough to drive slice-data parsing.
 
-use crate::bits::{unescape, Bits};
+use crate::bits::{Bits, unescape};
 use std::collections::HashMap;
 
 /// A short-term reference picture set: (delta POC, used by current picture).
@@ -68,7 +68,11 @@ pub struct Sps {
 impl Sps {
     /// 0 for monochrome (or separate colour planes), else `chroma_format_idc`.
     pub fn chroma_array_type(&self) -> u32 {
-        if self.separate_colour_plane { 0 } else { self.chroma_format_idc }
+        if self.separate_colour_plane {
+            0
+        } else {
+            self.chroma_format_idc
+        }
     }
 
     pub fn ctb_width(&self) -> u32 {
@@ -441,11 +445,15 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, String> {
         return Err("SPS ran past its end".into());
     }
     if s.log2_ctb > 6 || s.log2_ctb < 4 || s.log2_max_tb > 5 {
-        return Err(format!("implausible SPS (ctb {}, max tb {})", s.log2_ctb, s.log2_max_tb));
+        return Err(format!(
+            "implausible SPS (ctb {}, max tb {})",
+            s.log2_ctb, s.log2_max_tb
+        ));
     }
     Ok(s)
 }
 
+#[allow(clippy::field_reassign_with_default)]
 pub fn parse_pps(rbsp: &[u8]) -> Result<Pps, String> {
     let mut r = Bits::new(rbsp);
     let mut p = Pps::default();
@@ -567,8 +575,14 @@ pub fn parse_slice_header(
         r.skip(1);
     }
     let pps_id = r.ue();
-    let pps = ps.pps.get(&pps_id).ok_or(format!("slice references missing PPS {pps_id}"))?;
-    let sps = ps.sps.get(&pps.sps_id).ok_or(format!("PPS references missing SPS {}", pps.sps_id))?;
+    let pps = ps
+        .pps
+        .get(&pps_id)
+        .ok_or(format!("slice references missing PPS {pps_id}"))?;
+    let sps = ps
+        .sps
+        .get(&pps.sps_id)
+        .ok_or(format!("PPS references missing SPS {}", pps.sps_id))?;
 
     let mut dependent = false;
     let mut address = 0;
@@ -623,7 +637,11 @@ pub fn parse_slice_header(
                 let n_pics = r.ue();
                 for i in 0..n_sps + n_pics {
                     if i < n_sps {
-                        let idx = if num_lt_sps > 1 { r.u(ceil_log2(num_lt_sps)) as usize } else { 0 };
+                        let idx = if num_lt_sps > 1 {
+                            r.u(ceil_log2(num_lt_sps)) as usize
+                        } else {
+                            0
+                        };
                         if sps.lt_ref_pics.get(idx).ok_or("bad lt_idx_sps")?.1 {
                             num_pic_total_curr += 1;
                         }
@@ -650,7 +668,14 @@ pub fn parse_slice_header(
         }
         sh.num_ref_idx_active = [0, 0];
         if sh.slice_type != 2 {
-            sh.num_ref_idx_active = [pps.num_ref_idx_default[0], if sh.slice_type == 0 { pps.num_ref_idx_default[1] } else { 0 }];
+            sh.num_ref_idx_active = [
+                pps.num_ref_idx_default[0],
+                if sh.slice_type == 0 {
+                    pps.num_ref_idx_default[1]
+                } else {
+                    0
+                },
+            ];
             if r.bit() == 1 {
                 sh.num_ref_idx_active[0] = r.ue() + 1;
                 if sh.slice_type == 0 {
@@ -752,7 +777,11 @@ fn skip_pred_weight_table(r: &mut Bits, sps: &Sps, sh: &SliceHeader) {
     for list in 0..(if sh.slice_type == 0 { 2 } else { 1 }) {
         let n = sh.num_ref_idx_active[list] as usize;
         let luma: Vec<bool> = (0..n).map(|_| r.bit() == 1).collect();
-        let chroma_flags: Vec<bool> = if chroma { (0..n).map(|_| r.bit() == 1).collect() } else { vec![false; n] };
+        let chroma_flags: Vec<bool> = if chroma {
+            (0..n).map(|_| r.bit() == 1).collect()
+        } else {
+            vec![false; n]
+        };
         for i in 0..n {
             if luma[i] {
                 r.se();

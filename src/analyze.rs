@@ -3,12 +3,12 @@
 
 use crate::bits::unescape;
 use crate::bmff::Extracted;
-use crate::cabac::{Stats, CAT_NAMES, NCAT};
+use crate::cabac::{CAT_NAMES, NCAT, Stats};
 use crate::cabac::{Cabac, Io};
-use crate::ctu::{decode_slice, Pic};
+use crate::ctu::{Pic, decode_slice};
 use crate::model::Model;
 use crate::nal::{for_each_nal, is_slice, load_config};
-use crate::ps::{parse_slice_header, ParamSets, SliceHeader};
+use crate::ps::{ParamSets, SliceHeader, parse_slice_header};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -51,7 +51,11 @@ pub fn run(data: &[u8], ex: &Extracted, verbose: bool, model: &mut Model) {
         .map(|c| {
             let mut ps = ParamSets::default();
             load_config(&mut ps, c);
-            ConfigState { ps, pic: None, prev: None }
+            ConfigState {
+                ps,
+                pic: None,
+                prev: None,
+            }
         })
         .collect();
 
@@ -104,7 +108,9 @@ pub fn run(data: &[u8], ex: &Extracted, verbose: bool, model: &mut Model) {
                     g.ok += 1;
                     g.est_bits += r.stats.total_bits();
                     g.stats.add(&r.stats);
-                    *g.tail.entry((data.len() * 8) as i64 - r.consumed_bits as i64).or_default() += 1;
+                    *g.tail
+                        .entry((data.len() * 8) as i64 - r.consumed_bits as i64)
+                        .or_default() += 1;
                 }
                 Err(e) => {
                     g.failed += 1;
@@ -180,6 +186,12 @@ fn print_breakdown(s: &Stats) {
     let model_total: f64 = s.model_bits.iter().sum();
     println!(
         "  {:<28} {:>10} {:>10} {:>12.0} {:>6.2}% {:>12.0} {:>7.1}%",
-        "TOTAL", "", "", total, 100.0, model_total, 100.0 * (1.0 - model_total / total)
+        "TOTAL",
+        "",
+        "",
+        total,
+        100.0,
+        model_total,
+        100.0 * (1.0 - model_total / total)
     );
 }

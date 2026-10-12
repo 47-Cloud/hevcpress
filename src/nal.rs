@@ -2,7 +2,7 @@
 
 use crate::bits::unescape;
 use crate::bmff::Extracted;
-use crate::ps::{parse_slice_header, ParamSets};
+use crate::ps::{ParamSets, parse_slice_header};
 use std::collections::BTreeMap;
 
 pub fn nal_name(t: u8) -> String {
@@ -46,7 +46,9 @@ pub fn is_slice(t: u8) -> bool {
 pub fn for_each_nal<'a>(unit: &'a [u8], len_size: usize, mut f: impl FnMut(&'a [u8])) -> bool {
     let mut pos = 0;
     while pos + len_size <= unit.len() {
-        let len = unit[pos..pos + len_size].iter().fold(0usize, |a, &x| (a << 8) | x as usize);
+        let len = unit[pos..pos + len_size]
+            .iter()
+            .fold(0usize, |a, &x| (a << 8) | x as usize);
         pos += len_size;
         if len < 2 || pos + len > unit.len() {
             return false;

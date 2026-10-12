@@ -2,7 +2,7 @@
 //! prediction unit, transform tree and residual coding. Only the syntax is
 //! parsed; no samples are reconstructed.
 
-use crate::cabac::{ctx, Cabac, Cat, SavedState, Stats};
+use crate::cabac::{Cabac, Cat, SavedState, Stats, ctx};
 use crate::model::Mc;
 use crate::ps::{Pps, SliceHeader, Sps};
 use std::sync::OnceLock;
@@ -107,9 +107,11 @@ impl Plane {
 impl Pic {
     fn neighbours(&self, plane: usize, px: usize, py: usize) -> Nb {
         let p = &self.tbs[plane];
-        let mut nb = Nb::default();
-        nb.l = p.lookup(px as isize / 4 - 1, py as isize / 4);
-        nb.a = p.lookup(px as isize / 4, py as isize / 4 - 1);
+        let mut nb = Nb {
+            l: p.lookup(px as isize / 4 - 1, py as isize / 4),
+            a: p.lookup(px as isize / 4, py as isize / 4 - 1),
+            ..Nb::default()
+        };
         let norm = |b: &Blk| {
             let m = 1u32 << b.log2;
             b.sum * 64 / (m * m)
@@ -150,7 +152,11 @@ impl Pic {
         let Some(i) = blk else { return (15, 0) };
         let b = &self.tbs[plane].blocks[i];
         let m = 1usize << b.log2;
-        let (bx, by) = if m >= n { (x * (m / n), y * (m / n)) } else { (x / (n / m), y / (n / m)) };
+        let (bx, by) = if m >= n {
+            (x * (m / n), y * (m / n))
+        } else {
+            (x / (n / m), y / (n / m))
+        };
         let k = by * m + bx;
         let sg = match b.sgn[k] {
             0 => 0,
@@ -166,7 +172,13 @@ impl Pic {
         let p = &mut self.tbs[plane];
         let abs: Vec<u8> = absv[..n * n].iter().map(|&v| v.min(255) as u8).collect();
         let sum = absv[..n * n].iter().map(|&v| v as u32).sum();
-        p.blocks.push(Blk { log2: log2 as u8, abs, sgn: sgn[..n * n].to_vec(), sum, last });
+        p.blocks.push(Blk {
+            log2: log2 as u8,
+            abs,
+            sgn: sgn[..n * n].to_vec(),
+            sum,
+            last,
+        });
         let id = p.blocks.len() as u32;
         let (x4, y4, n4) = (px / 4, py / 4, (n / 4).max(1));
         for j in 0..n4 {
@@ -204,7 +216,11 @@ impl Pic {
             tbs: {
                 let plane = |w: usize, h: usize| {
                     let w4 = w.div_ceil(4);
-                    Plane { w4, ids: vec![0; w4 * h.div_ceil(4)], blocks: Vec::new() }
+                    Plane {
+                        w4,
+                        ids: vec![0; w4 * h.div_ceil(4)],
+                        blocks: Vec::new(),
+                    }
                 };
                 let (w, h) = (sps.width as usize, sps.height as usize);
                 [plane(w, h), plane(w / 2, h / 2), plane(w / 2, h / 2)]
@@ -215,7 +231,6 @@ impl Pic {
 
 pub struct SliceResult {
     pub stats: Stats,
-    pub ctus: u32,
     /// Bits of slice data consumed, counting from the start of the slice data.
     pub consumed_bits: usize,
 }
@@ -268,9 +283,12 @@ struct P<'a, 'c> {
 
 type R<T> = Result<T, String>;
 
+/// Scan positions per scan type and block size.
+type ScanTables = Vec<Vec<Vec<(u8, u8)>>>;
+
 /// Scan order tables: `scan(scan_idx, log2_blk)` gives (x, y) for each position.
 fn scan(scan_idx: u32, log2_blk: u32) -> &'static [(u8, u8)] {
-    static T: OnceLock<Vec<Vec<Vec<(u8, u8)>>>> = OnceLock::new();
+    static T: OnceLock<ScanTables> = OnceLock::new();
     let t = T.get_or_init(|| {
         (0..3)
             .map(|idx| {
@@ -339,12 +357,27 @@ pub fn decode_slice<'c>(
     }
     let init_type = match sh.slice_type {
         2 => 0,
-        1 => if sh.cabac_init_flag { 2 } else { 1 },
-        _ => if sh.cabac_init_flag { 1 } else { 2 },
+        1 => {
+            if sh.cabac_init_flag {
+                2
+            } else {
+                1
+            }
+        }
+        _ => {
+            if sh.cabac_init_flag {
+                1
+            } else {
+                2
+            }
+        }
     };
     let mut stat_coeff = [0u8; 4];
     if sh.dependent {
-        let (saved, stat) = pic.saved.as_ref().ok_or("dependent slice segment without saved contexts")?;
+        let (saved, stat) = pic
+            .saved
+            .as_ref()
+            .ok_or("dependent slice segment without saved contexts")?;
         c.restore_contexts(saved);
         stat_coeff = *stat;
     } else {
@@ -384,7 +417,6 @@ pub fn decode_slice<'c>(
     let total = ctb_w * sps.ctb_height();
     let wpp = pps.entropy_coding_sync;
     let mut rs = sh.segment_address;
-    let mut ctus = 0;
     loop {
         if rs >= total {
             return Err("slice data runs past the end of the picture".into());
@@ -409,7 +441,6 @@ pub fn decode_slice<'c>(
         p.sao(rx, ry);
         p.coding_quadtree(rx << sps.log2_ctb, ry << sps.log2_ctb, sps.log2_ctb, 0)
             .map_err(|e| format!("{e} (CTU {rs})"))?;
-        ctus += 1;
         if wpp && rx == 1.min(ctb_w - 1) && ctb_w > 1 {
             p.pic.wpp = Some((p.c.save_contexts(), p.stat_coeff));
         }
@@ -428,7 +459,10 @@ pub fn decode_slice<'c>(
     if pps.dependent_slice_segments_enabled {
         p.pic.saved = Some((p.c.save_contexts(), p.stat_coeff));
     }
-    let result = SliceResult { stats: p.c.stats.clone(), ctus, consumed_bits: p.c.bit_pos() };
+    let result = SliceResult {
+        stats: p.c.stats.clone(),
+        consumed_bits: p.c.bit_pos(),
+    };
     Ok((result, p.c))
 }
 
@@ -458,11 +492,19 @@ impl<'a, 'c> P<'a, 'c> {
 
     /// Neighbour CU record (see `Pic::info`), or 0x100 if unavailable.
     fn info_l(&self, x: u32, y: u32) -> u32 {
-        if self.avail_left(x, y) { self.pic.info[self.cb_idx(x - 1, y)] as u32 } else { 0x100 }
+        if self.avail_left(x, y) {
+            self.pic.info[self.cb_idx(x - 1, y)] as u32
+        } else {
+            0x100
+        }
     }
 
     fn info_u(&self, x: u32, y: u32) -> u32 {
-        if self.avail_up(x, y) { self.pic.info[self.cb_idx(x, y - 1)] as u32 } else { 0x100 }
+        if self.avail_up(x, y) {
+            self.pic.info[self.cb_idx(x, y - 1)] as u32
+        } else {
+            0x100
+        }
     }
 
     fn cb_idx(&self, x: u32, y: u32) -> usize {
@@ -505,7 +547,11 @@ impl<'a, 'c> P<'a, 'c> {
 
         let mut cur = SaoCtb::default();
         for c_idx in 0..(if self.chroma { 3 } else { 1 }) {
-            if !(if c_idx == 0 { self.sh.sao_luma } else { self.sh.sao_chroma }) {
+            if !(if c_idx == 0 {
+                self.sh.sao_luma
+            } else {
+                self.sh.sao_chroma
+            }) {
                 continue;
             }
             let ci = c_idx as u32;
@@ -530,7 +576,11 @@ impl<'a, 'c> P<'a, 'c> {
             if ty == 0 {
                 continue;
             }
-            let bit_depth = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
+            let bit_depth = if c_idx == 0 {
+                self.sps.bit_depth_luma
+            } else {
+                self.sps.bit_depth_chroma
+            };
             let cmax = (1u32 << (bit_depth.min(10) - 5)) - 1;
             let ln = left.map_or([9u8; 4], |l| l.off[c_idx]);
             let un = up.map_or([9u8; 4], |u| u.off[c_idx]);
@@ -543,7 +593,14 @@ impl<'a, 'c> P<'a, 'c> {
                     mc.add(&[2, ty, k as u32, a, prev.min(9)]);
                     mc.add(&[3, ci, ty, k as u32, a, (ln[k] as u32).min(9)]);
                     mc.add(&[4, ty, k as u32, a, (ln[k] as u32).min(9), (un[k] as u32).min(9)]);
-                    mc.add(&[5, ci, ty, a, prev.min(9), if k > 1 { cur.off[c_idx][k - 2] as u32 } else { 99 }.min(9)]);
+                    mc.add(&[
+                        5,
+                        ci,
+                        ty,
+                        a,
+                        prev.min(9),
+                        if k > 1 { cur.off[c_idx][k - 2] as u32 } else { 99 }.min(9),
+                    ]);
                     if self.c.bypass_m(Cat::SaoOffset, &mc) == 0 {
                         break;
                     }
@@ -591,8 +648,16 @@ impl<'a, 'c> P<'a, 'c> {
         let sps = self.sps;
         let split = if x0 + size <= self.w() && y0 + size <= self.h() && log2 > sps.log2_min_cb {
             let (il, iu) = (self.info_l(x0, y0), self.info_u(x0, y0));
-            let ld = if il != 0x100 { self.pic.ct_depth[self.cb_idx(x0 - 1, y0)] as u32 } else { 9 };
-            let ud = if iu != 0x100 { self.pic.ct_depth[self.cb_idx(x0, y0 - 1)] as u32 } else { 9 };
+            let ld = if il != 0x100 {
+                self.pic.ct_depth[self.cb_idx(x0 - 1, y0)] as u32
+            } else {
+                9
+            };
+            let ud = if iu != 0x100 {
+                self.pic.ct_depth[self.cb_idx(x0, y0 - 1)] as u32
+            } else {
+                9
+            };
             let inc = (ld != 9 && ld > depth) as usize + (ud != 9 && ud > depth) as usize;
             let qp4 = (self.qp_now().max(0) / 4) as u32;
             let cmask = (1u32 << sps.log2_ctb) - 1;
@@ -651,7 +716,14 @@ impl<'a, 'c> P<'a, 'c> {
     fn coding_unit(&mut self, x0: u32, y0: u32, log2: u32, depth: u32) -> R<()> {
         let size = 1u32 << log2;
         let sps = self.sps;
-        self.cu = Cu { part: PART_2NX2N, luma_modes: [1; 4], x: x0, y: y0, depth, ..Cu::default() };
+        self.cu = Cu {
+            part: PART_2NX2N,
+            luma_modes: [1; 4],
+            x: x0,
+            y: y0,
+            depth,
+            ..Cu::default()
+        };
         self.fill_ipm(x0, y0, size, 1);
         if self.pps.cu_qp_delta_enabled && self.qg_new {
             self.qg_new = false;
@@ -659,8 +731,16 @@ impl<'a, 'c> P<'a, 'c> {
             let (xq, yq) = (x0 & qg_mask, y0 & qg_mask);
             let ctb_mask = (1u32 << sps.log2_ctb) - 1;
             let prev = self.cur_qp;
-            let a = if xq & ctb_mask != 0 { self.pic.qp[self.cb_idx(xq - 1, yq)] as i32 } else { prev };
-            let b = if yq & ctb_mask != 0 { self.pic.qp[self.cb_idx(xq, yq - 1)] as i32 } else { prev };
+            let a = if xq & ctb_mask != 0 {
+                self.pic.qp[self.cb_idx(xq - 1, yq)] as i32
+            } else {
+                prev
+            };
+            let b = if yq & ctb_mask != 0 {
+                self.pic.qp[self.cb_idx(xq, yq - 1)] as i32
+            } else {
+                prev
+            };
             self.qp_pred = (a + b + 1) >> 1;
         } else if !self.pps.cu_qp_delta_enabled {
             self.qp_pred = self.sh.slice_qp;
@@ -735,7 +815,13 @@ impl<'a, 'c> P<'a, 'c> {
                 let mut mc = Mc::new(self.cu.part as usize);
                 mc.add(&[1, self.cu.part as u32, self.cu.merge_flag as u32]);
                 mc.add(&[2, depth, il & 7, iu & 7]);
-                mc.add(&[3, log2, self.cu.part as u32, self.cu.merge_flag as u32, self.cu.merge_idx.min(2)]);
+                mc.add(&[
+                    3,
+                    log2,
+                    self.cu.part as u32,
+                    self.cu.merge_flag as u32,
+                    self.cu.merge_idx.min(2),
+                ]);
                 rqt_root_cbf = self.c.decision_m(ctx::NO_RESIDUAL, Cat::NoResidual, &mc) == 1;
             }
             if rqt_root_cbf {
@@ -745,7 +831,7 @@ impl<'a, 'c> P<'a, 'c> {
                     sps.max_th_depth_inter
                 };
                 let mode = self.cu.luma_modes[0];
-                self.transform_tree(x0, y0, x0, y0, log2, log2, 0, 0, false, false, mode)?;
+                self.transform_tree(x0, y0, x0, y0, log2, 0, 0, false, false, mode)?;
             }
         }
 
@@ -756,7 +842,10 @@ impl<'a, 'c> P<'a, 'c> {
                 for j in 0..n4 {
                     for i in 0..n4 {
                         let kk = ((y0 / 4) as usize + j) * self.pic.w4 + (x0 / 4) as usize + i;
-                        if (x0 / 4) as usize + i < self.pic.w4 && kk < self.pic.tu_log2.len() && self.pic.tu_log2[kk] == 0 {
+                        if (x0 / 4) as usize + i < self.pic.w4
+                            && kk < self.pic.tu_log2.len()
+                            && self.pic.tu_log2[kk] == 0
+                        {
                             self.pic.tu_log2[kk] = log2 as u8;
                         }
                     }
@@ -849,7 +938,11 @@ impl<'a, 'c> P<'a, 'c> {
         let at = |xx: u32, yy: u32| self.pic.ipm[(yy / 4) as usize * self.pic.w4 + (xx / 4) as usize];
         let left = if self.avail_left(x, y) { at(x - 1, y) } else { 1 };
         // Candidates never come from the CTB row above.
-        let up = if y & ctb_mask != 0 && self.avail_up(x, y) { at(x, y - 1) } else { 1 };
+        let up = if y & ctb_mask != 0 && self.avail_up(x, y) {
+            at(x, y - 1)
+        } else {
+            1
+        };
         (left, up)
     }
 
@@ -898,8 +991,7 @@ impl<'a, 'c> P<'a, 'c> {
                 let (left, up) = self.mpm_neighbours(px, py);
                 let cand = Self::mpm_candidates(left, up);
                 let (lu, uu) = (left as u32, up as u32);
-                let mode;
-                if prev[idx] {
+                let mode = if prev[idx] {
                     let mut mpm = 0usize;
                     while mpm < 2 {
                         let mut mc = Mc::new(mpm);
@@ -912,7 +1004,7 @@ impl<'a, 'c> P<'a, 'c> {
                         }
                         mpm += 1;
                     }
-                    mode = cand[mpm];
+                    cand[mpm]
                 } else {
                     let mut rem = 0u32;
                     for bit in 0..5u32 {
@@ -935,25 +1027,45 @@ impl<'a, 'c> P<'a, 'c> {
                             m += 1;
                         }
                     }
-                    mode = m;
-                }
+                    m
+                };
                 self.cu.luma_modes[idx] = mode;
                 self.fill_ipm(px, py, pb, mode);
             }
         }
         if self.chroma {
             let luma = self.cu.luma_modes[0] as u32;
-            let cm = |v: u32| if v == 0x100 { 7 } else { self.pic.cmode[v as usize] as u32 };
+            let cm = |v: u32| {
+                if v == 0x100 {
+                    7
+                } else {
+                    self.pic.cmode[v as usize] as u32
+                }
+            };
             let (il, iu) = (self.info_l(x0, y0), self.info_u(x0, y0));
-            let lc = if il != 0x100 { self.pic.cmode[self.cb_idx(x0 - 1, y0)] as u32 } else { 7 };
-            let uc = if iu != 0x100 { self.pic.cmode[self.cb_idx(x0, y0 - 1)] as u32 } else { 7 };
+            let lc = if il != 0x100 {
+                self.pic.cmode[self.cb_idx(x0 - 1, y0)] as u32
+            } else {
+                7
+            };
+            let uc = if iu != 0x100 {
+                self.pic.cmode[self.cb_idx(x0, y0 - 1)] as u32
+            } else {
+                7
+            };
             let _ = cm;
             let mut mc = Mc::new(0);
             mc.add(&[1, 0]);
             mc.add(&[2, luma]);
             mc.add(&[3, lc, uc]);
             mc.add(&[4, luma, lc, uc]);
-            mc.add(&[5, (luma < 2) as u32, (luma == 10) as u32, (luma == 26) as u32, lc.min(4)]);
+            mc.add(&[
+                5,
+                (luma < 2) as u32,
+                (luma == 10) as u32,
+                (luma == 26) as u32,
+                lc.min(4),
+            ]);
             let syntax = if self.c.decision_m(ctx::INTRA_CHROMA, Cat::IntraChroma, &mc) == 0 {
                 4
             } else {
@@ -1029,7 +1141,11 @@ impl<'a, 'c> P<'a, 'c> {
                 mc.add(&[1, depth]);
                 mc.add(&[2, depth, w, h]);
                 mc.add(&[3, depth, part, self.last_idc]);
-                if self.c.decision_m(ctx::INTER_PRED_IDC + depth as usize, Cat::InterPredIdc, &mc) == 1 {
+                if self
+                    .c
+                    .decision_m(ctx::INTER_PRED_IDC + depth as usize, Cat::InterPredIdc, &mc)
+                    == 1
+                {
                     2
                 } else {
                     self.c.decision(ctx::INTER_PRED_IDC + 4, Cat::InterPredIdc)
@@ -1129,7 +1245,6 @@ impl<'a, 'c> P<'a, 'c> {
         y0: u32,
         x_base: u32,
         y_base: u32,
-        log2_cb: u32,
         log2: u32,
         depth: u32,
         blk_idx: u32,
@@ -1139,7 +1254,11 @@ impl<'a, 'c> P<'a, 'c> {
     ) -> R<()> {
         let sps = self.sps;
         let cu = self.cu;
-        let luma_mode = if cu.intra_split && depth == 1 { cu.luma_modes[blk_idx as usize] } else { parent_mode };
+        let luma_mode = if cu.intra_split && depth == 1 {
+            cu.luma_modes[blk_idx as usize]
+        } else {
+            parent_mode
+        };
 
         let qp4 = (self.qp_now().max(0) / 4) as u32;
         let intra = cu.intra as u32;
@@ -1151,10 +1270,17 @@ impl<'a, 'c> P<'a, 'c> {
             let mut mc = Mc::new((log2 - 2) as usize * 2 + intra as usize);
             mc.add(&[1, 5 - log2]);
             mc.add(&[2, log2, depth, intra, cu.part as u32]);
-            mc.add(&[3, log2, self.tu_cmp(x0, y0, log2, true), self.tu_cmp(x0, y0, log2, false)]);
+            mc.add(&[
+                3,
+                log2,
+                self.tu_cmp(x0, y0, log2, true),
+                self.tu_cmp(x0, y0, log2, false),
+            ]);
             mc.add(&[4, log2, depth, qp4, intra]);
             mc.add(&[5, log2, cu.max_trafo_depth - depth, intra]);
-            self.c.decision_m(ctx::SPLIT_TRANSFORM + 5 - log2 as usize, Cat::SplitTransform, &mc) == 1
+            self.c
+                .decision_m(ctx::SPLIT_TRANSFORM + 5 - log2 as usize, Cat::SplitTransform, &mc)
+                == 1
         } else {
             let inter_split = sps.max_th_depth_inter == 0 && !cu.intra && cu.part != PART_2NX2N && depth == 0;
             log2 > sps.log2_max_tb || (cu.intra_split && depth == 0) || inter_split
@@ -1191,7 +1317,7 @@ impl<'a, 'c> P<'a, 'c> {
             let half = 1u32 << (log2 - 1);
             let (x1, y1) = (x0 + half, y0 + half);
             for (idx, (x, y)) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].into_iter().enumerate() {
-                self.transform_tree(x, y, x0, y0, log2_cb, log2 - 1, depth + 1, idx as u32, cbf_cb, cbf_cr, luma_mode)?;
+                self.transform_tree(x, y, x0, y0, log2 - 1, depth + 1, idx as u32, cbf_cb, cbf_cr, luma_mode)?;
             }
             return Ok(());
         }
@@ -1208,7 +1334,10 @@ impl<'a, 'c> P<'a, 'c> {
             mc.add(&[5, depth, qp4, log2]);
             mc.add(&[6, self.last_cbf_luma, depth, log2, intra]);
             mc.add(&[7, lh, uh, cbf_cb as u32, cbf_cr as u32, self.last_cbf_luma]);
-            cbf_luma = self.c.decision_m(ctx::CBF_LUMA + (depth == 0) as usize, Cat::CbfLuma, &mc) == 1;
+            cbf_luma = self
+                .c
+                .decision_m(ctx::CBF_LUMA + (depth == 0) as usize, Cat::CbfLuma, &mc)
+                == 1;
             self.last_cbf_luma = cbf_luma as u32;
         }
         {
@@ -1224,7 +1353,9 @@ impl<'a, 'c> P<'a, 'c> {
                 }
             }
         }
-        self.transform_unit(x0, y0, x_base, y_base, log2, blk_idx, cbf_luma, cbf_cb, cbf_cr, luma_mode)
+        self.transform_unit(
+            x0, y0, x_base, y_base, log2, blk_idx, cbf_luma, cbf_cb, cbf_cr, luma_mode,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1264,7 +1395,11 @@ impl<'a, 'c> P<'a, 'c> {
                 mc.add(&[4, prefix, cu.depth, qp4]);
                 mc.add(&[5, prefix, intra, log2]);
                 mc.add(&[6, prefix, edge, a0]);
-                if self.c.decision_m(ctx::CU_QP_DELTA + (prefix > 0) as usize, Cat::CuQpDelta, &mc) == 0 {
+                if self
+                    .c
+                    .decision_m(ctx::CU_QP_DELTA + (prefix > 0) as usize, Cat::CuQpDelta, &mc)
+                    == 0
+                {
                     break;
                 }
                 prefix += 1;
@@ -1333,24 +1468,62 @@ impl<'a, 'c> P<'a, 'c> {
         if self.chroma {
             if log2 > 2 {
                 if cbf_cb {
-                    self.residual_coding(log2 - 1, 1, scan_chroma, cu.chroma_mode as u32, x0 as usize / 2, y0 as usize / 2)?;
+                    self.residual_coding(
+                        log2 - 1,
+                        1,
+                        scan_chroma,
+                        cu.chroma_mode as u32,
+                        x0 as usize / 2,
+                        y0 as usize / 2,
+                    )?;
                 }
                 if cbf_cr {
-                    self.residual_coding(log2 - 1, 2, scan_chroma, cu.chroma_mode as u32, x0 as usize / 2, y0 as usize / 2)?;
+                    self.residual_coding(
+                        log2 - 1,
+                        2,
+                        scan_chroma,
+                        cu.chroma_mode as u32,
+                        x0 as usize / 2,
+                        y0 as usize / 2,
+                    )?;
                 }
             } else if blk_idx == 3 {
                 if cbf_cb {
-                    self.residual_coding(2, 1, scan_chroma, cu.chroma_mode as u32, x_base as usize / 2, y_base as usize / 2)?;
+                    self.residual_coding(
+                        2,
+                        1,
+                        scan_chroma,
+                        cu.chroma_mode as u32,
+                        x_base as usize / 2,
+                        y_base as usize / 2,
+                    )?;
                 }
                 if cbf_cr {
-                    self.residual_coding(2, 2, scan_chroma, cu.chroma_mode as u32, x_base as usize / 2, y_base as usize / 2)?;
+                    self.residual_coding(
+                        2,
+                        2,
+                        scan_chroma,
+                        cu.chroma_mode as u32,
+                        x_base as usize / 2,
+                        y_base as usize / 2,
+                    )?;
                 }
             }
         }
         Ok(())
     }
 
-    fn sig_ctx(&self, x_c: u32, y_c: u32, log2: u32, c_idx: u32, scan_idx: u32, csbf: &[[bool; 8]; 8], ts_ctx: bool) -> usize {
+    #[allow(clippy::too_many_arguments)]
+    fn sig_ctx(
+        &self,
+        x_c: u32,
+        y_c: u32,
+        log2: u32,
+        c_idx: u32,
+        scan_idx: u32,
+        csbf: &[[bool; 8]; 8],
+        ts_ctx: bool,
+    ) -> usize {
         if ts_ctx {
             return if c_idx == 0 { 42 } else { 43 };
         }
@@ -1364,16 +1537,44 @@ impl<'a, 'c> P<'a, 'c> {
             let n = (1usize << (log2 - 2)) - 1;
             let prev = (xs < n && csbf[xs + 1][ys]) as u32 + 2 * (ys < n && csbf[xs][ys + 1]) as u32;
             let mut s = match prev {
-                0 => if xp + yp == 0 { 2 } else if xp + yp < 3 { 1 } else { 0 },
-                1 => if yp == 0 { 2 } else if yp == 1 { 1 } else { 0 },
-                2 => if xp == 0 { 2 } else if xp == 1 { 1 } else { 0 },
+                0 => {
+                    if xp + yp == 0 {
+                        2
+                    } else if xp + yp < 3 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                1 => {
+                    if yp == 0 {
+                        2
+                    } else if yp == 1 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                2 => {
+                    if xp == 0 {
+                        2
+                    } else if xp == 1 {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 _ => 2,
             };
             if c_idx == 0 {
                 if xs > 0 || ys > 0 {
                     s += 3;
                 }
-                s += if log2 == 3 { if scan_idx == 0 { 9 } else { 15 } } else { 21 };
+                s += if log2 == 3 {
+                    if scan_idx == 0 { 9 } else { 15 }
+                } else {
+                    21
+                };
             } else {
                 s += if log2 == 3 { 9 } else { 12 };
             }
@@ -1406,7 +1607,11 @@ impl<'a, 'c> P<'a, 'c> {
 
     /// 0 none, 1 smaller, 2 equal, 3 larger: the neighbouring TU size relative to `log2`.
     fn tu_cmp(&self, x: u32, y: u32, log2: u32, left: bool) -> u32 {
-        let (nx, ny) = if left { (x.wrapping_sub(1), y) } else { (x, y.wrapping_sub(1)) };
+        let (nx, ny) = if left {
+            (x.wrapping_sub(1), y)
+        } else {
+            (x, y.wrapping_sub(1))
+        };
         if nx >= self.sps.width || ny >= self.sps.height {
             return 0;
         }
@@ -1430,7 +1635,15 @@ impl<'a, 'c> P<'a, 'c> {
         }
     }
 
-    fn residual_coding(&mut self, log2: u32, c_idx: u32, scan_idx: u32, pred_mode_intra: u32, px: usize, py: usize) -> R<()> {
+    fn residual_coding(
+        &mut self,
+        log2: u32,
+        c_idx: u32,
+        scan_idx: u32,
+        pred_mode_intra: u32,
+        px: usize,
+        py: usize,
+    ) -> R<()> {
         let sps = self.sps;
         let cu = self.cu;
         let chroma = (c_idx > 0) as u32;
@@ -1446,19 +1659,29 @@ impl<'a, 'c> P<'a, 'c> {
 
         let mut transform_skip = false;
         if self.pps.transform_skip_enabled && !cu.tq_bypass && log2 <= self.pps.log2_max_transform_skip_size {
-            transform_skip = self.c.decision(ctx::TRANSFORM_SKIP + chroma as usize, Cat::TransformSkip) == 1;
+            transform_skip = self
+                .c
+                .decision(ctx::TRANSFORM_SKIP + chroma as usize, Cat::TransformSkip)
+                == 1;
         }
         let mut explicit_rdpcm = false;
         if !cu.intra && sps.explicit_rdpcm && (transform_skip || cu.tq_bypass) {
-            explicit_rdpcm = self.c.decision(ctx::EXPLICIT_RDPCM + chroma as usize, Cat::TransformSkip) == 1;
+            explicit_rdpcm = self
+                .c
+                .decision(ctx::EXPLICIT_RDPCM + chroma as usize, Cat::TransformSkip)
+                == 1;
             if explicit_rdpcm {
-                self.c.decision(ctx::EXPLICIT_RDPCM_DIR + chroma as usize, Cat::TransformSkip);
+                self.c
+                    .decision(ctx::EXPLICIT_RDPCM_DIR + chroma as usize, Cat::TransformSkip);
             }
         }
 
         // Last significant coefficient position.
         let (ctx_offset, ctx_shift) = if c_idx == 0 {
-            (3 * (log2 as usize - 2) + ((log2 as usize - 1) >> 2), (log2 as usize + 1) >> 2)
+            (
+                3 * (log2 as usize - 2) + ((log2 as usize - 1) >> 2),
+                (log2 as usize + 1) >> 2,
+            )
         } else {
             (15, log2 as usize - 2)
         };
@@ -1476,7 +1699,11 @@ impl<'a, 'c> P<'a, 'c> {
                 mc.add(&[5, chroma, l2, ax, i, self.prev_last[chroma as usize][axis]]);
                 mc.add(&[6, chroma, l2, ax, i, nb.l_last[axis], nb.a_last[axis]]);
                 mc.add(&[7, chroma, l2, ax, i, act, xact]);
-                if self.c.decision_m(base + (i as usize >> ctx_shift) + ctx_offset, Cat::LastPrefix, &mc) == 0 {
+                if self
+                    .c
+                    .decision_m(base + (i as usize >> ctx_shift) + ctx_offset, Cat::LastPrefix, &mc)
+                    == 0
+                {
                     break;
                 }
                 i += 1;
@@ -1536,8 +1763,16 @@ impl<'a, 'c> P<'a, 'c> {
                     ctx_cg += csbf[xs][ys + 1] as usize;
                 }
                 let inc = ctx_cg.min(1) + if c_idx > 0 { 2 } else { 0 };
-                let nz_r = if xs < n_cg - 1 { cg_nsig[xs + 1][ys].min(4) as u32 } else { 9 };
-                let nz_b = if ys < n_cg - 1 { cg_nsig[xs][ys + 1].min(4) as u32 } else { 9 };
+                let nz_r = if xs < n_cg - 1 {
+                    cg_nsig[xs + 1][ys].min(4) as u32
+                } else {
+                    9
+                };
+                let nz_b = if ys < n_cg - 1 {
+                    cg_nsig[xs][ys + 1].min(4) as u32
+                } else {
+                    9
+                };
                 let mut mc = Mc::new((chroma * 8 + (log2 - 2)) as usize);
                 mc.add(&[1, inc as u32]);
                 mc.add(&[2, chroma, l2, xs as u32, ys as u32]);
@@ -1691,7 +1926,10 @@ impl<'a, 'c> P<'a, 'c> {
             let last_nz = sig_pos[0] as i32;
             let first_nz = sig_pos[nsig - 1] as i32;
             let sign_hidden = !(cu.tq_bypass
-                || (cu.intra && sps.implicit_rdpcm && transform_skip && (pred_mode_intra == 10 || pred_mode_intra == 26))
+                || (cu.intra
+                    && sps.implicit_rdpcm
+                    && transform_skip
+                    && (pred_mode_intra == 10 || pred_mode_intra == 26))
                 || explicit_rdpcm)
                 && last_nz - first_nz >= 4;
             let hide = self.pps.sign_data_hiding && sign_hidden;
@@ -1726,7 +1964,11 @@ impl<'a, 'c> P<'a, 'c> {
 
             // Remaining absolute levels.
             let sb_type = 2 * (c_idx == 0) as usize + (transform_skip || cu.tq_bypass) as usize;
-            let mut rice = if sps.persistent_rice { (self.stat_coeff[sb_type] / 4) as u32 } else { 0 };
+            let mut rice = if sps.persistent_rice {
+                (self.stat_coeff[sb_type] / 4) as u32
+            } else {
+                0
+            };
             let mut rice_init_done = false;
             let mut sum_abs = 0u32;
             let mut prev_rem = 99u32;
@@ -1736,7 +1978,11 @@ impl<'a, 'c> P<'a, 'c> {
                 } else {
                     1
                 };
-                let threshold = if m < 8 { if Some(m) == first_gt1 { 3 } else { 2 } } else { 1 };
+                let threshold = if m < 8 {
+                    if Some(m) == first_gt1 { 3 } else { 2 }
+                } else {
+                    1
+                };
                 let mut level = base;
                 if base == threshold {
                     let (x_c, y_c) = coord(sig_pos[m]);
@@ -1746,11 +1992,16 @@ impl<'a, 'c> P<'a, 'c> {
                     let (av, _) = self.pic.nb_val(plane, nb.a, x_c, y_c, n);
                     let (xv, _) = self.pic.nb_val(nb.xp, nb.x, x_c, y_c, n);
                     let extra = [act, qs(lv.min(3) + av.min(3) + xv.min(3)), xact];
-                    let (rem, pre) = self.coeff_abs_level_remaining(rice, chroma, l2, qs(sum), threshold, prev_rem, pb, qpb, extra)?;
+                    let (rem, pre) =
+                        self.coeff_abs_level_remaining(rice, chroma, l2, qs(sum), threshold, prev_rem, pb, qpb, extra)?;
                     prev_rem = pre;
                     level = base + rem;
                     if level > (3 << rice) {
-                        rice = if sps.persistent_rice { rice + 1 } else { (rice + 1).min(4) };
+                        rice = if sps.persistent_rice {
+                            rice + 1
+                        } else {
+                            (rice + 1).min(4)
+                        };
                     }
                     if sps.persistent_rice && !rice_init_done {
                         let init = (self.stat_coeff[sb_type] / 4) as u32;
@@ -1777,7 +2028,8 @@ impl<'a, 'c> P<'a, 'c> {
                 self.sgn[y_c * n + x_c] = s;
             }
         }
-        self.pic.register(plane, px, py, log2, &self.absv, &self.sgn, [last_x, last_y]);
+        self.pic
+            .register(plane, px, py, log2, &self.absv, &self.sgn, [last_x, last_y]);
         Ok(())
     }
 

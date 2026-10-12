@@ -19,7 +19,12 @@ struct Stage {
 
 impl Stage {
     fn new(n: usize, mu: i64) -> Stage {
-        Stage { w: vec![0; n], h: vec![0; n], energy: 0, mu }
+        Stage {
+            w: vec![0; n],
+            h: vec![0; n],
+            energy: 0,
+            mu,
+        }
     }
 
     fn predict(&self) -> i32 {
@@ -55,7 +60,12 @@ struct Predictor {
 
 impl Predictor {
     fn new() -> Predictor {
-        Predictor { s1: Stage::new(16, 6000), s2: Stage::new(16, 8000), p1: 0, p2: 0 }
+        Predictor {
+            s1: Stage::new(16, 6000),
+            s2: Stage::new(16, 8000),
+            p1: 0,
+            p2: 0,
+        }
     }
 
     fn predict(&mut self) -> i32 {
@@ -167,7 +177,10 @@ impl<'a> Coder<'a> {
 
 /// Encode interleaved samples with `channels` channels.
 pub fn encode(samples: &[i16], channels: usize, model: &mut Model, enc: &mut Encoder) {
-    let mut coder = Coder { io: Io::Enc(enc), model };
+    let mut coder = Coder {
+        io: Io::Enc(enc),
+        model,
+    };
     let mut preds: Vec<Predictor> = (0..channels).map(|_| Predictor::new()).collect();
     let mut ctxs = vec![ChanCtx::default(); channels];
     for (i, &x) in samples.iter().enumerate() {
@@ -179,7 +192,10 @@ pub fn encode(samples: &[i16], channels: usize, model: &mut Model, enc: &mut Enc
 }
 
 pub fn decode(n: usize, channels: usize, model: &mut Model, dec: &mut Decoder) -> Vec<i16> {
-    let mut coder = Coder { io: Io::Dec(dec), model };
+    let mut coder = Coder {
+        io: Io::Dec(dec),
+        model,
+    };
     let mut preds: Vec<Predictor> = (0..channels).map(|_| Predictor::new()).collect();
     let mut ctxs = vec![ChanCtx::default(); channels];
     let mut out = Vec::with_capacity(n);
