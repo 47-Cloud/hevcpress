@@ -11,7 +11,7 @@ keywords = ["hevc", "heic", "compression", "lossless", "cabac"]
 categories = ["compression", "multimedia::images", "multimedia::video", "command-line-utilities"]
 
 [dependencies]
-xz2 = "0.1.7"
+xz2 = { version = "0.1.7", features = ["static"] }
 
 [profile.release]
 codegen-units = 1
